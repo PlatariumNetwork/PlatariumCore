@@ -1,0 +1,54 @@
+[package]
+name = "platarium-core"
+version = "1.0.0"
+edition = "2021"
+authors = ["Platarium Team"]
+description = "High-performance cryptographic core library for Platarium Network, implemented in Rust. Supports BIP39 mnemonic generation, BIP32 HD wallets, ECDSA secp256k1 signatures, and HKDF key derivation."
+license = "MIT"
+repository = "https://github.com/Platarium-com/PlatariumNetwork"
+homepage = "https://github.com/Platarium-com/PlatariumNetwork"
+documentation = "https://docs.rs/platarium-core"
+keywords = ["cryptography", "blockchain", "bip39", "bip32", "secp256k1", "wallet", "signature"]
+categories = ["cryptography", "authentication"]
+readme = "README.md"
+
+[lib]
+name = "platarium_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "platarium-cli"
+path = "src/main.rs"
+
+[dependencies]
+# BIP39 mnemonic generation
+bip39 = "2.0"
+# BIP32 HD key derivation
+bip32 = "0.5"
+# secp256k1 elliptic curve cryptography
+secp256k1 = { version = "0.28", features = ["rand", "recovery", "global-context"] }
+# Cryptographic hashing
+sha2 = "0.10"
+# HKDF key derivation
+hkdf = "0.12"
+# Hex encoding/decoding
+hex = "0.4"
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+# Random number generation
+rand = "0.8"
+# Byte manipulation
+bytes = "1.5"
+# CLI argument parsing
+clap = { version = "4.5", features = ["derive"] }
+
+[dev-dependencies]
+
+[[test]]
+name = "integration"
+path = "tests/integration_test.rs"
+
