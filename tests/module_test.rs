@@ -8,7 +8,7 @@ fn test_all_modules_loaded() {
     let (_, _) = generate_mnemonic().unwrap();
     let _part = generate_alphanumeric_part(10).unwrap();
     
-    println!("✓ All modules loaded successfully");
+    println!("OK: All modules loaded successfully");
 }
 
 #[test]
@@ -22,7 +22,7 @@ fn test_error_handling() {
     // Test invalid seed index
     assert!(KeyGenerator::new(2u32.pow(31), None, None, None).is_err());
     
-    println!("✓ Error handling test passed");
+    println!("OK: Error handling test passed");
 }
 
 #[test]
@@ -37,7 +37,7 @@ fn test_key_generator_different_indices() {
     assert_ne!(keys0.public_key, keys1.public_key);
     assert_ne!(keys0.private_key, keys1.private_key);
     
-    println!("✓ Different key indices test passed");
+    println!("OK: Different key indices test passed");
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn test_signature_components() {
     assert!(!sig.der.is_empty());
     assert!(!sig.signature_compact.is_empty());
     
-    println!("✓ Signature components test passed");
+    println!("OK: Signature components test passed");
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn test_multiple_signatures_same_message() {
     assert_eq!(sig1.signatures[0].r, sig2.signatures[0].r);
     assert_eq!(sig1.signatures[1].r, sig2.signatures[1].r);
     
-    println!("✓ Multiple signatures consistency test passed");
+    println!("OK: Multiple signatures consistency test passed");
 }
 
 #[test]
@@ -87,6 +87,6 @@ fn test_different_messages_different_hashes() {
     
     assert_ne!(hash1, hash2);
     
-    println!("✓ Different messages produce different hashes test passed");
+    println!("OK: Different messages produce different hashes test passed");
 }
 

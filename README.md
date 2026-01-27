@@ -17,6 +17,12 @@ High-performance cryptographic core library for Platarium Network, implemented i
 - **ECDSA secp256k1** - Elliptic curve cryptography for signatures and identification
 - **HKDF Key Derivation** - Secure key derivation using HKDF (HMAC-based Key Derivation Function)
 - **Dual-Key Signature Scheme** - Sign messages with two keys for enhanced security
+- **Transaction Processing** - Complete transaction execution engine with state management
+- **Multi-Asset Transfers** - PLP and Token(symbol); amount in minimal units; fee always μPLP
+- **State Snapshots** - O(1) immutable snapshots with copy-on-write semantics
+- **Transaction Simulation** - Dry-run transactions without modifying global state
+- **Dynamic Fee Calculation** - Load-based fee system with micro-PLP (μPLP) units; fee always μPLP
+- **Deterministic Execution** - Guaranteed reproducibility (no randomness, no system time)
 - **Zero-Cost Abstractions** - Native performance with Rust's type safety
 
 ## 📦 Installation
@@ -56,13 +62,13 @@ cargo run --bin platarium-cli -- generate-keys \
 
 # Sign message
 cargo run --bin platarium-cli -- sign-message \
-  --message '{"from":"Px1234","to":"Px5678","value":"100"}' \
+  --message '{"from":"Px000001","to":"Px000002","value":"100"}' \
   --mnemonic "your mnemonic" \
   --alphanumeric "YOURCODE"
 
 # Verify signature
 cargo run --bin platarium-cli -- verify-signature \
-  --message '{"from":"Px1234","to":"Px5678","value":"100"}' \
+  --message '{"from":"Px000001","to":"Px000002","value":"100"}' \
   --signature "..." \
   --pubkey "..."
 ```
@@ -107,7 +113,7 @@ Sign a JSON message with both keys (main + HKDF):
 
 ```bash
 platarium-cli sign-message \
-  --message '{"from":"Px1234","to":"Px5678","value":"100"}' \
+  --message '{"from":"Px000001","to":"Px000002","value":"100"}' \
   --mnemonic "word1 word2 ... word24" \
   --alphanumeric "ABC123XYZ789"
 ```
@@ -117,13 +123,15 @@ platarium-cli sign-message \
 - `--mnemonic` / `-m`: BIP39 mnemonic phrase (required)
 - `--alphanumeric` / `-a`: Alphanumeric code (required)
 
+⚠️ **Note:** `timestamp` is user-provided metadata for message signing only and is not used in transaction execution or consensus.
+
 #### Verify Signature
 
 Verify a message signature:
 
 ```bash
 platarium-cli verify-signature \
-  --message '{"from":"Px1234","to":"Px5678","value":"100"}' \
+  --message '{"from":"Px000001","to":"Px000002","value":"100"}' \
   --signature "signature_hex_string" \
   --pubkey "public_key_hex_string"
 ```
@@ -156,10 +164,20 @@ cargo test -- --nocapture
 
 ### Test Coverage
 
-- ✅ 13 integration tests
-- ✅ 6 module tests
-- ✅ Unit tests for each module
-- ✅ Full workflow tests
+- ✅ **13 integration tests** - End-to-end workflow tests
+- ✅ **6 module tests** - Module-level integration tests
+- ✅ **116 unit tests** - Comprehensive unit test coverage across all modules
+  - **9 transaction tests** - Transaction structure, validation, hash, multi-asset
+  - **39 state tests** - State management, snapshots, restore, asset/uplp balances
+  - **11 execution tests** - Execution logic, simulation, context handling
+  - **12 mempool tests** - Transaction pool management (incl. fairness / anti-starvation)
+  - **24 fee calculation tests** - Fee computation, load multipliers, micro-PLP
+  - **7 determinism tests** - Determinism verification across modules
+  - **4 core tests** - Core engine integration
+  - **Additional tests** - Mnemonic, keys, signatures, utilities, asset
+- ✅ **Full workflow tests** - Complete transaction lifecycle
+- ✅ **Snapshot and restore tests** - Included in state tests (25+ tests)
+- ✅ **Determinism verification tests** - Cross-module determinism checks
 
 ## 📚 Usage
 
@@ -212,8 +230,8 @@ let restored = key_gen.restore_keys(
 use platarium_core::*;
 
 let message = serde_json::json!({
-    "from": "Px1234",
-    "to": "Px5678",
+    "from": "Px000001",
+    "to": "Px000002",
     "value": "100",
     "timestamp": 1234567890
 });
@@ -224,6 +242,8 @@ println!("Hash: {}", signature_result.hash);
 println!("Main signature: {:?}", signature_result.signatures[0]);
 println!("HKDF signature: {:?}", signature_result.signatures[1]);
 ```
+
+⚠️ **Note:** `timestamp` is user-provided metadata for message signing only and is not used in transaction execution or consensus.
 
 ### Verify Signature
 
@@ -239,6 +259,233 @@ let verified = verify_signature(
 assert!(verified);
 ```
 
+## 💸 Transaction Processing
+
+Platarium Core provides a complete transaction processing system with state management, fee calculation, and execution contexts.
+
+### Transaction Structure
+
+Transactions support **multi-asset** transfers. **Fee is always paid in μPLP** (minimum fee unit); the transfer asset does not affect the fee.
+
+```rust
+use platarium_core::{Transaction, Core, State, Mempool, Asset};
+use std::collections::HashSet;
+
+let tx = Transaction::new(
+    "Px000001".to_string(),      // from
+    "Px000002".to_string(),      // to
+    Asset::PLP,                  // asset (PLP or Token("USDT"), etc.)
+    100,                         // amount in minimal units of asset
+    1,                           // fee_uplp: always μPLP (min 1)
+    0,                           // nonce
+    HashSet::new(),              // reads
+    HashSet::new(),              // writes
+    "sig_main".to_string(),      // main signature
+    "sig_derived".to_string(),   // derived signature
+)?;
+```
+
+**Transaction Fields:**
+- `hash` - Deterministic transaction hash
+- `from` / `to` - Sender and receiver addresses
+- `asset` - Transfer asset: `Asset::PLP` or `Asset::Token(symbol)` (e.g. `"USDT"`, `"NFT:123"`)
+- `amount` - Transfer amount in **minimal units of the asset** (u128)
+- `fee_uplp` - Fee in **μPLP only** (u128); minimum 1 μPLP. Fee currency is fixed and not configurable.
+- `nonce` - Transaction nonce (prevents replay attacks)
+- `reads` / `writes` - Address sets for parallel execution support
+- `sig_main` / `sig_derived` - Dual signatures for security
+
+### Currency and Fee Rules
+
+- **PLP** = base network currency. **μPLP** = minimum fee unit (1 μPLP = 0.000001 PLP, 1 PLP = 1_000_000 μPLP).
+- **Fee**: Always **μPLP only**. Fee currency is fixed to μPLP and is not configurable. Fee = 0 is forbidden.
+- **Amount**: In minimal units of `asset` (PLP ⇒ μPLP; tokens ⇒ token-specific minimal units). Asset does not affect fee.
+- **Other fee currencies** (ETH, BTC, USD, gas, etc.) are **FORBIDDEN**
+
+### Core Transaction Processing
+
+```rust
+use platarium_core::{Core, Transaction, State, Mempool, Asset};
+use std::collections::HashSet;
+
+let core = Core::new();
+
+// Initialize sender: asset balance (e.g. PLP) and μPLP for fees
+core.state().set_balance(&"Px000001".to_string(), 1000);       // PLP balance
+core.state().set_uplp_balance(&"Px000001".to_string(), 10);    // μPLP for fees
+core.state().set_nonce(&"Px000001".to_string(), 0);
+
+let tx = Transaction::new(
+    "Px000001".to_string(),
+    "Px000002".to_string(),
+    Asset::PLP,
+    100,    // amount in minimal units
+    1,      // fee_uplp (μPLP)
+    0,
+    HashSet::new(),
+    HashSet::new(),
+    "sig_main".to_string(),
+    "sig_derived".to_string(),
+)?;
+
+let tx_hash = core.submit_transaction(tx)?;
+```
+
+### State Management
+
+State keeps **asset balances** (per address and asset) and **μPLP balances** (for fees) separately. Fee is always paid from μPLP.
+
+```rust
+use platarium_core::{State, StateSnapshot, SnapshotableState, Asset};
+
+let state = State::new();
+
+// Set PLP balance and μPLP (fee) balance
+state.set_balance(&"Px000001".to_string(), 1000);       // PLP (legacy: set_asset_balance(..., PLP, ...))
+state.set_uplp_balance(&"Px000001".to_string(), 10);    // μPLP for fees
+state.set_nonce(&"Px000001".to_string(), 0);
+
+let snapshot = state.snapshot();
+state.apply_transaction(&tx)?;
+state.restore(&snapshot);
+
+assert_eq!(state.get_balance(&"Px000001".to_string()), 1000);
+// Asset balance: get_asset_balance(addr, &Asset::PLP) or get_asset_balance(addr, &Asset::Token("USDT"))
+// Fee balance: get_uplp_balance(addr)
+```
+
+### Transaction Simulation
+
+Simulate transactions without modifying global state:
+
+```rust
+use platarium_core::{ExecutionLogic, ExecutionResult, StateSnapshot};
+
+// Create snapshot of current state
+let snapshot = state.snapshot();
+
+// Simulate transaction
+let result = ExecutionLogic::simulate(&tx, &snapshot);
+
+// Check result using helper methods
+if result.is_success() {
+    if let Some(final_state) = result.get_final_state() {
+        // Transaction would succeed
+        // final_state contains the resulting state snapshot
+        let new_balance = final_state.get_balance(&"Px000001".to_string());
+        println!("New balance would be: {}", new_balance);
+    }
+} else {
+    // Transaction would fail
+    if let Some(err) = result.get_error() {
+        println!("Simulation failed: {}", err);
+    }
+}
+
+// Original state unchanged
+assert_eq!(state.get_balance(&"Px000001".to_string()), 1000);
+```
+
+### Fee Calculation
+
+Dynamic fee calculation based on network load:
+
+```rust
+use platarium_core::{MicroPLP, BASE_TX_FEE_MICRO_PLP, calculate_fee_from_load, calculate_load_multiplier, calculate_fee_micro_plp};
+
+// Calculate fee based on network load
+let pending_tx_count = 500; // 50% load
+let fee = calculate_fee_from_load(pending_tx_count); // 2 μPLP
+
+// Fee buckets:
+// 0-30% load   → 1x multiplier → 1 μPLP
+// 31-60% load  → 2x multiplier → 2 μPLP
+// 61-80% load  → 3x multiplier → 3 μPLP
+// 81-100% load → 5x multiplier → 5 μPLP
+
+// Type-safe fee calculation
+let base_fee = MicroPLP::new(BASE_TX_FEE_MICRO_PLP); // 1 μPLP
+let multiplier = calculate_load_multiplier(pending_tx_count);
+let fee = calculate_fee_micro_plp(base_fee, multiplier);
+```
+
+### Execution Contexts
+
+Support for production and simulation modes:
+
+```rust
+use platarium_core::{ExecutionContext, ExecutionLogic};
+
+// Production mode (commits changes)
+let ctx_prod = ExecutionContext::Production;
+ExecutionLogic::commit(ctx_prod)?; // OK - commits allowed
+
+// Simulation mode (forbidden to commit)
+let ctx_sim = ExecutionContext::Simulation;
+ExecutionLogic::commit(ctx_sim)?; // Error: CommitNotAllowedInSimulation
+
+// Execute transaction with context
+use platarium_core::{State, Transaction, Asset};
+use std::collections::HashSet;
+let state = State::new();
+let tx = Transaction::new("from".into(), "to".into(), Asset::PLP, 100, 1, 0, HashSet::new(), HashSet::new(), "sig_main".into(), "sig_derived".into())?;
+
+// Execute in production mode
+ExecutionLogic::execute_transaction(&state, &tx, ExecutionContext::Production)?;
+ExecutionLogic::commit(ExecutionContext::Production)?;
+
+// Execute in simulation mode (changes are temporary)
+ExecutionLogic::execute_transaction(&state, &tx, ExecutionContext::Simulation)?;
+// Note: In simulation, changes should be rolled back or applied to temporary state
+```
+
+### Mempool Management
+
+**Mempool Fairness & Determinism:** Transactions are ordered by `(arrival_index, tx.hash)`.
+`arrival_index` is a local monotonic counter (no system time) used only in the mempool for
+fairness; the execution layer receives only `Transaction`. See `core::mempool` module docs.
+
+```rust
+use platarium_core::Mempool;
+
+let mempool = Mempool::new();
+
+// Add transaction
+mempool.add_transaction(tx.clone())?;
+
+// Get all transactions (fair, deterministic order: arrival then hash)
+let all_txs = mempool.get_all_transactions();
+
+// Check if transaction exists
+if mempool.contains(&tx.hash) {
+    println!("Transaction in mempool");
+}
+
+// Get transaction count
+let count = mempool.len();
+
+// Remove single transaction after execution
+mempool.remove_transaction(&tx.hash);
+
+// Remove multiple transactions after block execution
+let tx_hashes = vec![tx1.hash.clone(), tx2.hash.clone()];
+mempool.remove_transactions(&tx_hashes);
+
+// Clear all transactions
+mempool.clear();
+```
+
+### Key Features
+
+- ✅ **Deterministic Execution** - Same transactions → same state (always)
+- ✅ **State Snapshots** - O(1) snapshot creation with copy-on-write
+- ✅ **Transaction Simulation** - Test transactions without side effects
+- ✅ **Dynamic Fees** - Load-based fee calculation (1x, 2x, 3x, 5x multipliers); fee always μPLP
+- ✅ **Multi-Asset Transfers** - PLP and `Token(symbol)`; amount in minimal units; fee always μPLP
+- ✅ **Atomic Operations** - All-or-nothing state updates
+- ✅ **Nonce Management** - Prevents replay attacks
+- ✅ **Balance Validation** - Asset balance ≥ amount, μPLP balance ≥ fee before execution
+
 ## 🏗️ Architecture
 
 ```
@@ -251,6 +498,15 @@ PlatariumCore/
 │   ├── signature.rs        # Signature verification
 │   ├── utils.rs            # Utilities (HKDF, hash, verifyCorrelation)
 │   ├── error.rs            # Error handling
+│   ├── core/               # Transaction processing core
+│   │   ├── mod.rs          # Core execution engine
+│   │   ├── asset.rs        # Asset type (PLP, Token)
+│   │   ├── transaction.rs  # Transaction structure and validation
+│   │   ├── state.rs        # State management and snapshots
+│   │   ├── mempool.rs      # Transaction pool (mempool)
+│   │   ├── execution.rs    # Execution logic and simulation
+│   │   ├── fee.rs          # Fee calculation (micro-PLP)
+│   │   └── determinism.rs  # Determinism audit and enforcement
 │   └── main.rs             # CLI entry point
 ├── tests/
 │   ├── integration_test.rs # Integration tests
@@ -289,6 +545,86 @@ PlatariumCore/
 - `verify_correlation()` - Verify correlation between keys
 - `bn_to_hex32()` - Convert to 64-character hex
 
+### Transaction Core
+
+- `Asset` - Transfer asset type (`PLP` | `Token(symbol)`). Exported from `platarium_core`.
+- `Transaction` - Canonical transaction structure
+  - `new()` - Create new transaction (from, to, asset, amount, fee_uplp, nonce, reads, writes, sig_main, sig_derived)
+  - `compute_hash()` - Compute deterministic transaction hash
+  - `validate_basic()` - Validate transaction (amount > 0, fee_uplp ≥ 1, signatures)
+  - `verify_signatures()` - Verify both signatures (main + derived)
+- `Core` - Main transaction processing engine
+  - `new()` - Create new Core instance
+  - `submit_transaction()` - Submit and execute transaction
+  - `state()` - Get state manager reference
+  - `mempool()` - Get mempool reference
+- `State` - Blockchain state manager with snapshots
+  - `new()` - Create new empty state
+  - `get_balance(addr)` - Get PLP balance (legacy; 0 if not found)
+  - `get_asset_balance(addr, asset)` - Get balance for given asset
+  - `get_uplp_balance(addr)` - Get μPLP balance (for fees)
+  - `get_nonce(addr)` - Get address nonce (0 if not found)
+  - `set_balance(addr, amt)` - Set PLP balance
+  - `set_asset_balance(addr, asset, amt)` - Set balance for asset
+  - `set_uplp_balance(addr, amt)` - Set μPLP balance
+  - `set_nonce(addr, n)` - Set address nonce
+  - `apply_transaction(tx)` - Validate and apply transaction
+  - `apply_transfer(from, to, asset, amount, fee_uplp, nonce)` - Deduct fee from μPLP, amount from asset; credit amount to receiver, fee to treasury
+  - `snapshot()` - Create immutable state snapshot (O(1))
+  - `restore(snapshot)` - Restore state from snapshot (rollback)
+- `TREASURY_ADDRESS` - Fee recipient constant (`"treasury"`).
+- `Mempool` - Transaction pool for pending transactions
+  - `new()` - Create new empty mempool
+  - `add_transaction()` - Add transaction (prevents duplicates)
+  - `get_transaction()` - Get transaction by hash
+  - `remove_transaction()` - Remove single transaction
+  - `remove_transactions()` - Remove multiple transactions
+  - `get_all_transactions()` - Get all transactions (fair order: arrival_index, then hash; see mempool docs)
+  - `len()` - Get transaction count
+  - `is_empty()` - Check if mempool is empty
+  - `contains()` - Check if transaction exists
+  - `clear()` - Clear all transactions
+- `StateSnapshot` - Immutable state snapshots (O(1) creation)
+  - `get_balance()` - Get address balance from snapshot
+  - `get_nonce()` - Get address nonce from snapshot
+- `ExecutionContext` - Production/Simulation execution modes
+  - `Production` - Production mode (commits allowed)
+  - `Simulation` - Simulation mode (commits forbidden)
+- `ExecutionLogic` - Shared execution logic
+  - `validate_transaction()` - Validate transaction (signatures, amount, fee)
+  - `check_transaction_applicability()` - Check if transaction can be applied (nonce, balance)
+  - `apply_transaction_effects()` - Apply transaction effects to state
+  - `execute_transaction()` - Execute transaction (combines all steps)
+  - `commit()` - Commit transaction (context-dependent)
+  - `simulate()` - Simulate transaction on snapshot
+- `ExecutionResult` - Transaction execution results
+  - `is_success()` / `is_failure()` - Check execution status
+  - `get_final_state()` - Get resulting state snapshot
+  - `get_error()` - Get error message if failed
+
+### Fee Calculation
+
+- `MicroPLP` - Type-safe micro-PLP currency type (newtype wrapper around u64)
+  - `new()` - Create new MicroPLP value
+  - `as_u64()` - Get underlying u64 value
+  - `as_plp()` - Convert to PLP (integer part)
+  - `remainder_micro_plp()` - Get remainder after PLP conversion
+- Constants:
+  - `MICRO_PLP_PER_PLP` - Conversion constant (1_000_000)
+  - `BASE_TX_FEE_MICRO_PLP` - Base transaction fee (1 μPLP = 0.000001 PLP)
+  - `MAX_BATCH_SIZE` - Maximum batch size for load calculation (1000)
+  - `MULTIPLIER_1X` - Load multiplier for 0-30% load (1x)
+  - `MULTIPLIER_2X` - Load multiplier for 31-60% load (2x)
+  - `MULTIPLIER_3X` - Load multiplier for 61-80% load (3x)
+  - `MULTIPLIER_5X` - Load multiplier for 81-100% load (5x)
+- Functions:
+  - `calculate_fee_from_load()` - Calculate fee based on pending transaction count
+  - `calculate_fee_from_load_micro_plp()` - Type-safe version returning MicroPLP
+  - `calculate_load_multiplier()` - Calculate load multiplier from pending count
+  - `calculate_fee()` - Calculate fee from base fee and multiplier
+  - `calculate_fee_micro_plp()` - Type-safe version returning MicroPLP
+  - `fee_to_plp_string()` - Convert fee to PLP string for display
+
 ## 🔒 Security
 
 - **Memory Safety** - Rust's ownership system prevents memory-related vulnerabilities
@@ -301,6 +637,4 @@ PlatariumCore/
 
 MIT License - see [LICENSE](LICENSE) file for details.
 
-## 👥 Authors
-
-**Built with ❤️ by the Platarium Team**
+**Built with ❤️ by the Platarium team**

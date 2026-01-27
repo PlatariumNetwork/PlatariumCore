@@ -189,10 +189,10 @@ fn handle_verify_signature(
     
     if verified {
         println!("Verified: true");
-        println!("✓ Signature is valid");
+        println!("Signature is valid.");
     } else {
         println!("Verified: false");
-        println!("✗ Signature is invalid");
+        println!("Signature is invalid.");
         process::exit(1);
     }
     

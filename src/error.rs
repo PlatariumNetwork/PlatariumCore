@@ -19,6 +19,9 @@ pub enum PlatariumError {
     
     #[error("Key derivation error: {0}")]
     KeyDerivation(String),
+    
+    #[error("State error: {0}")]
+    State(String),
 }
 
 pub type Result<T> = std::result::Result<T, PlatariumError>;

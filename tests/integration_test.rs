@@ -8,7 +8,7 @@ fn test_mnemonic_generation() {
     assert_eq!(alphanumeric.len(), 12);
     assert!(validate_mnemonic(&mnemonic));
     
-    println!("✓ Mnemonic generation test passed");
+    println!("OK: Mnemonic generation test passed");
     println!("  Mnemonic: {}", mnemonic);
     println!("  Alphanumeric: {}", alphanumeric);
 }
@@ -19,7 +19,7 @@ fn test_mnemonic_validation() {
     assert!(validate_mnemonic(&mnemonic));
     assert!(!validate_mnemonic("invalid mnemonic phrase here"));
     
-    println!("✓ Mnemonic validation test passed");
+    println!("OK: Mnemonic validation test passed");
 }
 
 #[test]
@@ -31,7 +31,7 @@ fn test_generate_alphanumeric_part() {
     let part15 = generate_alphanumeric_part(15).unwrap();
     assert_eq!(part15.len(), 15);
     
-    println!("✓ Alphanumeric part generation test passed");
+    println!("OK: Alphanumeric part generation test passed");
 }
 
 #[test]
@@ -47,7 +47,7 @@ fn test_key_generator_generate_keys() {
     assert_eq!(keys.private_key.len(), 67); // PSx + 64 hex chars
     assert_eq!(keys.signature_key.len(), 66); // Sx + 64 hex chars
     
-    println!("✓ Key generation test passed");
+    println!("OK: Key generation test passed");
     println!("  Public Key: {}", keys.public_key);
     println!("  Private Key: {}...", &keys.private_key[..10]);
     println!("  Signature Key: {}...", &keys.signature_key[..10]);
@@ -69,7 +69,7 @@ fn test_key_generator_restore_keys() {
     assert_eq!(restored.private_key, generated.private_key);
     assert_eq!(restored.signature_key, generated.signature_key);
     
-    println!("✓ Key restoration test passed");
+    println!("OK: Key restoration test passed");
 }
 
 #[test]
@@ -96,7 +96,7 @@ fn test_key_correlation_verification() {
     
     assert!(is_valid, "Key correlation verification failed");
     
-    println!("✓ Key correlation verification test passed");
+    println!("OK: Key correlation verification test passed");
 }
 
 #[test]
@@ -107,7 +107,7 @@ fn test_custom_derivation_path() {
     
     assert_eq!(keys.derivation_paths.main_path, custom_path);
     
-    println!("✓ Custom derivation path test passed");
+    println!("OK: Custom derivation path test passed");
 }
 
 #[test]
@@ -125,7 +125,7 @@ fn test_sign_with_both_keys() {
     assert_eq!(result.signatures[1].sig_type, "hkdf");
     assert!(!result.hash.is_empty());
     
-    println!("✓ Sign with both keys test passed");
+    println!("OK: Sign with both keys test passed");
     println!("  Hash: {}", result.hash);
     println!("  Main signature R: {}...", &result.signatures[0].r[..16]);
     println!("  HKDF signature R: {}...", &result.signatures[1].r[..16]);
@@ -157,7 +157,7 @@ fn test_sign_and_verify_signature() {
     
     assert!(verified, "Signature verification failed");
     
-    println!("✓ Sign and verify test passed");
+    println!("OK: Sign and verify test passed");
 }
 
 #[test]
@@ -176,7 +176,7 @@ fn test_hash_message() {
     assert_eq!(hash1, hash2);
     assert_eq!(hash1.len(), 32);
     
-    println!("✓ Hash message test passed");
+    println!("OK: Hash message test passed");
     println!("  Hash: {}", hex::encode(hash1));
 }
 
@@ -188,7 +188,7 @@ fn test_bn_to_hex32() {
     assert_eq!(hex.len(), 64);
     assert!(hex.starts_with("0"));
     
-    println!("✓ BN to hex32 test passed");
+    println!("OK: BN to hex32 test passed");
     println!("  Hex: {}", hex);
 }
 
@@ -203,7 +203,7 @@ fn test_derive_signature_seed() {
     let signature_seed2 = derive_signature_seed_from_master_seed(master_seed, None, None).unwrap();
     assert_eq!(signature_seed, signature_seed2);
     
-    println!("✓ Derive signature seed test passed");
+    println!("OK: Derive signature seed test passed");
 }
 
 #[test]
@@ -248,6 +248,6 @@ fn test_full_workflow() {
     assert!(hkdf_sig_verified, "HKDF signature verification failed");
     
     println!("Step 4: Verified both signatures");
-    println!("✓ Full workflow test passed!");
+    println!("OK: Full workflow test passed!");
 }
 
