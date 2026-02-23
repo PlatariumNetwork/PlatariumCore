@@ -1,21 +1,15 @@
-// State module
-// Blockchain state management
-// This is the single source of truth for state
-//
-// DETERMINISM GUARANTEES:
-// =======================
-// - Same transaction order → same final state
-// - State updates are applied deterministically
-// - No randomness: all operations are deterministic
-// - No system time: no time-dependent state changes
-//
-// INVARIANTS:
-// - State transitions are deterministic functions of transactions
-// - Balance and nonce updates follow deterministic rules
-// - Same sequence of transactions always produces same state
+//! Blockchain state: single source of truth for balances, μPLP (fee) balances, and nonces.
+//!
+//! # Determinism
+//! Same transaction order yields the same final state. All updates are deterministic; no randomness or system time is used.
+//!
+//! # Invariants
+//! - State transitions are deterministic functions of the transaction sequence.
+//! - Balance and nonce updates follow fixed rules. Same sequence of transactions always produces the same state.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use sha2::{Sha256, Digest};
 use crate::error::{PlatariumError, Result};
 use crate::core::asset::Asset;
 use crate::core::transaction::{Transaction, TransactionValidationError};
@@ -24,81 +18,21 @@ use thiserror::Error;
 /// Fee recipient address. Fee is always in μPLP.
 pub const TREASURY_ADDRESS: &str = "treasury";
 
-/// Address type (alias for String)
+/// Address type (alias for String).
 pub type Address = String;
 
-/// Trait for types that can create immutable snapshots of their state
-/// 
-/// DETERMINISM GUARANTEES:
-/// =======================
-/// - Snapshot creation is deterministic: same state → same snapshot (always)
-/// - No randomness: snapshot depends only on state data
-/// - No system time: snapshot does not include timestamps or time-dependent data
-/// - Immutability: snapshot cannot be modified after creation
-/// 
-/// INVARIANTS:
-/// - Same state → same snapshot (deterministic)
-/// - Snapshot is immutable (no mutation methods)
-/// - Snapshot is independent of system time
+/// Trait for types that can produce immutable state snapshots. Same state yields the same snapshot; no randomness or system time. Snapshots are immutable.
 pub trait SnapshotableState {
-    /// Creates an immutable snapshot of the current state
-    /// 
-    /// DETERMINISM GUARANTEE:
-    /// - Same state → same snapshot (always)
-    /// - No randomness or system time used
-    /// - Snapshot is a pure function of state data
-    /// 
-    /// Returns a StateSnapshot that cannot be modified
+    /// Produces an immutable snapshot of the current state. Deterministic: same state yields the same snapshot.
     fn snapshot(&self) -> StateSnapshot;
 }
 
-/// Immutable snapshot of blockchain state
-/// 
-/// This structure captures the state at a specific point in time
-/// and guarantees that it cannot be modified after creation.
-/// 
-/// PERFORMANCE:
-/// ============
-/// - Snapshot creation is O(1): uses Arc for shared ownership, no data copying
-/// - No full state copy: snapshot shares data with state via Arc
-/// - Memory efficient: multiple snapshots share the same underlying data
-/// 
-/// DETERMINISM GUARANTEES:
-/// =======================
-/// - Snapshot creation is deterministic: same state → same snapshot
-/// - No system time: snapshot does not include timestamps
-/// - No randomness: snapshot depends only on state data
-/// - Immutability: snapshot fields are private and have no mutation methods
-/// 
-/// CRITICAL INVARIANTS (MUST BE PRESERVED FOREVER):
-/// =================================================
-/// 
-/// 1. **SNAPSHOT IMMUTABILITY**
-///    - Snapshot cannot be modified after creation
-///    - All fields are private and have no public mutation methods
-///    - Any operation on snapshot is read-only
-///    - Snapshot data remains constant regardless of state changes
-///    - ASSERT: Snapshot values never change after creation
-/// 
-/// 2. **RESTORE == IDENTITY**
-///    - restore(snapshot) must return state to exactly the state at snapshot creation time
-///    - For any state S and snapshot = state.snapshot():
-///      state.restore(&snapshot) → state == S (exactly)
-///    - Restore is idempotent: restore(snapshot) multiple times has same effect
-///    - ASSERT: After restore, state matches snapshot exactly
-/// 
-/// 3. **NO HIDDEN SIDE EFFECTS**
-///    - Snapshot creation has no side effects on state
-///    - Snapshot operations (get_balance, get_nonce, etc.) have no side effects
-///    - Restore operation only modifies state, never modifies snapshot
-///    - No global state, no static variables, no external dependencies
-///    - ASSERT: Snapshot operations are pure functions
-/// 
-/// ADDITIONAL INVARIANTS:
-/// ======================
-/// - Snapshot is deterministic (same state → same snapshot)
-/// - Snapshot is independent of system time
-/// - Snapshot creation is O(1) (no data copying, only Arc clone)
+/// Immutable snapshot of blockchain state. Cannot be modified after creation; creation is O(1) via `Arc` (no full copy).
+///
+/// # Invariants
+/// - **Immutability:** No mutation methods; snapshot values never change after creation.
+/// - **Restore identity:** For any state S, `state.restore(&state.snapshot())` restores S exactly; restore is idempotent.
+/// - **No side effects:** Snapshot creation and read operations are pure; restore only modifies state, not the snapshot.
 #[derive(Debug, Clone)]
 pub struct StateSnapshot {
     asset_balances: Arc<HashMap<(Address, String), u128>>,
@@ -129,7 +63,7 @@ impl StateSnapshot {
         &self.nonces
     }
 
-    /// PLP balance (legacy). Returns 0 if missing.
+    /// Returns the PLP balance for the address, or 0 if absent.
     pub fn get_balance(&self, address: &Address) -> u128 {
         let k = (address.clone(), Asset::PLP.as_canonical());
         self.asset_balances.get(&k).copied().unwrap_or(0)
@@ -139,7 +73,7 @@ impl StateSnapshot {
         self.nonces.get(address).copied().unwrap_or(0)
     }
 
-    /// PLP balances only, sorted by address (deterministic).
+    /// Returns all PLP balances, sorted by address for deterministic ordering.
     pub fn get_all_balances(&self) -> Vec<(Address, u128)> {
         let plp = Asset::PLP.as_canonical();
         let mut v: Vec<_> = self
@@ -160,6 +94,20 @@ impl StateSnapshot {
             .collect();
         v.sort_by(|a, b| a.0.cmp(&b.0));
         v
+    }
+
+    /// Computes the deterministic state root for the block header from sorted balances and nonces.
+    pub fn compute_state_root(&self) -> String {
+        let mut hasher = Sha256::new();
+        for (addr, bal) in self.get_all_balances() {
+            hasher.update(addr.as_bytes());
+            hasher.update(bal.to_le_bytes());
+        }
+        for (addr, nonce) in self.get_all_nonces() {
+            hasher.update(addr.as_bytes());
+            hasher.update(nonce.to_le_bytes());
+        }
+        hex::encode(hasher.finalize())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -184,7 +132,7 @@ impl PartialEq for StateSnapshot {
 
 impl Eq for StateSnapshot {}
 
-/// State-specific errors
+/// Errors produced by state operations.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum StateError {
     #[error("Insufficient balance: required {required}, available {available}")]
@@ -215,9 +163,7 @@ impl From<TransactionValidationError> for PlatariumError {
     }
 }
 
-/// Blockchain state manager
-/// Manages asset balances, μPLP (fee) balances, and nonces.
-/// Fee is always in μPLP; asset balance and uplp balance are separate.
+/// Blockchain state: asset balances, μPLP (fee) balances, and nonces. Fee is always in μPLP and is separate from asset balances.
 #[derive(Debug)]
 pub struct State {
     /// Asset balances: (address, asset_canonical) -> balance in minimal units

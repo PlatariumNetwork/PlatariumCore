@@ -1,16 +1,6 @@
-// Execution context and shared execution logic
-// This module provides execution context for dry-run/simulation mode
-//
-// DETERMINISM GUARANTEES:
-// =======================
-// - Execution context does not affect determinism
-// - Simulation mode produces same results as production mode
-// - No randomness or system time used in execution logic
-//
-// INVARIANTS:
-// - Shared execution logic is deterministic
-// - Simulation mode never commits changes to state
-// - Production mode always commits changes
+//! Execution context and shared execution logic for transaction processing.
+//!
+//! Supports production (commit to state) and simulation (dry-run) modes. Execution is deterministic: simulation and production yield the same result for the same inputs. No randomness or system time is used.
 
 use std::sync::Arc;
 use crate::error::{PlatariumError, Result};
@@ -18,21 +8,16 @@ use crate::core::transaction::Transaction;
 use crate::core::state::{State, StateSnapshot};
 use thiserror::Error;
 
-/// Execution context mode
-/// Determines whether transactions are committed or simulated
+/// Execution mode: whether transactions are committed to state or only simulated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionContext {
-    /// Production mode: transactions are committed to state
-    /// State changes are permanent
+    /// Production: transactions are committed; state changes are permanent.
     Production,
-    
-    /// Simulation mode: transactions are executed but not committed
-    /// State changes are temporary and can be rolled back
-    /// Used for dry-run, validation, and testing
+    /// Simulation: transactions are executed but not committed; used for dry-run and validation.
     Simulation,
 }
 
-/// Errors related to execution context
+/// Errors produced by the execution layer.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionError {
     #[error("Commit not allowed in simulation mode")]
@@ -48,33 +33,19 @@ impl From<ExecutionError> for PlatariumError {
     }
 }
 
-/// Result of transaction execution/simulation
-/// 
-/// Contains information about the execution result:
-/// - Success/failure status
-/// - Final state snapshot (if successful)
-/// - Error message (if failed)
-/// 
-/// DETERMINISM GUARANTEES:
-/// =======================
-/// - Same transaction + same snapshot → same ExecutionResult (always)
-/// - No randomness or system time used
-/// - Result is a pure function of input data
+/// Result of a single transaction execution or simulation. Same transaction and initial state yield the same result; no randomness or system time is used.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionResult {
-    /// Whether the execution was successful
+    /// Whether the execution succeeded.
     pub success: bool,
-    
-    /// Final state snapshot after execution (if successful)
-    /// This represents the state that would result from executing the transaction
+    /// Final state snapshot after execution (if successful).
     pub final_state: Option<StateSnapshot>,
-    
-    /// Error message if execution failed
+    /// Error message when execution failed.
     pub error: Option<String>,
 }
 
 impl ExecutionResult {
-    /// Creates a successful execution result
+    /// Constructs a successful result with the given final state.
     fn success(final_state: StateSnapshot) -> Self {
         Self {
             success: true,
@@ -83,7 +54,7 @@ impl ExecutionResult {
         }
     }
     
-    /// Creates a failed execution result
+    /// Constructs a failed result with the given error message.
     fn failure(error: String) -> Self {
         Self {
             success: false,
@@ -92,63 +63,38 @@ impl ExecutionResult {
         }
     }
     
-    /// Checks if execution was successful
+    /// Returns true if execution succeeded.
     pub fn is_success(&self) -> bool {
         self.success
     }
-    
-    /// Checks if execution failed
+
+    /// Returns true if execution failed.
     pub fn is_failure(&self) -> bool {
         !self.success
     }
-    
-    /// Gets the final state snapshot (if successful)
+
+    /// Returns the final state snapshot when execution succeeded.
     pub fn get_final_state(&self) -> Option<&StateSnapshot> {
         self.final_state.as_ref()
     }
-    
-    /// Gets the error message (if failed)
+
+    /// Returns the error message when execution failed.
     pub fn get_error(&self) -> Option<&str> {
         self.error.as_deref()
     }
 }
 
-/// Shared execution logic for transaction processing
-/// This module contains the common logic used by both production and simulation modes
+/// Shared execution logic used by both production and simulation: validation, applicability check, and effect application. All operations are deterministic.
 pub struct ExecutionLogic;
 
 impl ExecutionLogic {
-    /// Validates a transaction (shared logic)
-    /// 
-    /// This performs validation that doesn't require state access:
-    /// - Amount > 0
-    /// - Fee >= min_fee
-    /// - Signature validity
-    /// 
-    /// DETERMINISM: This is a pure function - same input → same output
-    /// 
-    /// Returns error if validation fails
+    /// Validates a transaction without state: amount &gt; 0, fee ≥ min_fee, signature validity. Pure function; errors if validation fails.
     pub fn validate_transaction(tx: &Transaction) -> Result<()> {
         tx.validate_basic()
             .map_err(|e| PlatariumError::from(e))
     }
     
-    /// Checks if transaction can be applied to state (shared logic)
-    /// 
-    /// This performs state-dependent validation:
-    /// - Nonce matches current nonce
-    /// - Sender has sufficient balance (amount + fee in PLP)
-    /// 
-    /// CURRENCY:
-    /// ========
-    /// - Amount is in PLP currency
-    /// - Fee is in micro-PLP (μPLP) currency
-    /// - Both are converted to PLP for balance checking (fee / 1_000_000)
-    /// - Other currencies (ETH, BTC, USD, gas, etc.) are FORBIDDEN
-    /// 
-    /// DETERMINISM: This is deterministic - same state + same transaction → same result
-    /// 
-    /// Returns error if transaction cannot be applied
+    /// Checks whether the transaction can be applied: nonce match, sufficient asset balance, sufficient μPLP for fee. Deterministic; errors if the transaction is not applicable.
     pub fn check_transaction_applicability(state: &State, tx: &Transaction) -> Result<()> {
         let current_nonce = state.get_nonce(&tx.from);
         if current_nonce != tx.nonce {
@@ -174,8 +120,7 @@ impl ExecutionLogic {
         Ok(())
     }
     
-    /// Applies transaction effects: deduct fee from uplp, amount from asset; credit amount to receiver, fee to treasury.
-    /// Fee is always μPLP. DETERMINISM: same state + same transaction -> same result.
+    /// Applies transaction effects: deducts fee from sender’s μPLP and amount from asset balance; credits amount to receiver and fee to treasury. Deterministic.
     pub fn apply_transaction_effects(state: &State, tx: &Transaction) -> Result<()> {
         state.apply_transfer(
             &tx.from,

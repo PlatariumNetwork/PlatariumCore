@@ -1,43 +1,6 @@
-// Fee calculation module
-// Implements fractional base fee model with load-based multipliers
-//
-// DETERMINISM GUARANTEES:
-// =======================
-// - All fee calculations are deterministic
-// - No float arithmetic: uses integer arithmetic with micro-PLP units
-// - No randomness or system time used
-// - No unsorted HashMap iteration (no HashMap iteration at all in fee path)
-// - Same inputs → same fee (always)
-//
-// DETERMINISM AUDIT:
-// ==================
-// This module has been audited for determinism compliance:
-// - NO FLOAT: All calculations use integer arithmetic (u64, u128)
-// - NO RNG: No random number generation
-// - NO SYSTEM TIME: No timestamps or time-dependent logic
-// - NO UNSORTED HASHMAP ITERATION: No HashMap iteration in fee path
-// - DETERMINISTIC: Same pending_tx_count -> same fee (always)
-//
-// FEE MODEL:
-// ==========
-// fee = base_fee * load_multiplier
-//
-// base_fee: fixed-point in micro-PLP (μPLP)
-//   1 PLP = 1_000_000 μPLP
-//   Base fee: 1 μPLP = 0.000001 PLP
-//
-// load_multiplier: based on network load
-//   load_factor = pending_tx_count / max_batch_size
-//   0–30%   → x1
-//   31–60%  → x2
-//   61–80%  → x3
-//   81–100% → x5
-//
-// INVARIANTS:
-// - Fee calculation is deterministic
-// - Minimum fee = 1 μPLP = 0.000001 PLP
-// - All calculations use integer arithmetic (no float)
-// - ONLY μPLP currency is allowed (no other currencies)
+//! Fee calculation: fractional base fee with load-based multipliers. All arithmetic is integer (μPLP); no float, RNG, or system time. Same inputs yield the same fee.
+//!
+//! **Model:** `fee = base_fee × load_multiplier`. Base fee is in μPLP (1 PLP = 1_000_000 μPLP). Load multiplier from `pending_tx_count / max_batch_size`: 0–30% → ×1, 31–60% → ×2, 61–80% → ×3, 81–100% → ×5. Minimum fee 1 μPLP.
 
 /// Fixed-point representation of PLP using micro-PLP (μPLP) units
 /// 

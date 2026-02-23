@@ -1,19 +1,12 @@
-// Core module for stateful transaction execution
-// This module will contain the transaction execution engine
-//
-// DETERMINISM GUARANTEES:
-// =======================
-// This module guarantees deterministic execution:
-// 1. Same transaction order → same final state
-// 2. No randomness: all operations are deterministic
-// 3. No system time: no timestamps or time-dependent logic
-// 4. Deterministic hash computation: HashSet elements are sorted before hashing
-// 5. Deterministic state updates: operations are applied in order
-//
-// INVARIANTS:
-// - Transaction hash is computed deterministically from transaction data
-// - State updates are applied atomically and in order
-// - No external sources of non-determinism (time, random, etc.)
+//! Core module: stateful transaction execution and consensus-related components.
+//!
+//! # Determinism
+//! Execution is deterministic: same transaction order yields the same final state. There is no randomness or system time in the execution path. Hash computation and state updates are deterministic and order-dependent.
+//!
+//! # Invariants
+//! - Transaction hash is computed deterministically from transaction data.
+//! - State updates are applied atomically and in order.
+//! - No external sources of non-determinism (time, RNG, etc.) are used in the core path.
 
 pub mod asset;
 pub mod transaction;
@@ -22,35 +15,31 @@ pub mod mempool;
 pub mod execution;
 pub mod fee;
 pub mod determinism;
+pub mod node_registry;
+pub mod validator_selection;
+pub mod confirmation_layer;
+pub mod block_assembly;
+pub mod slashing;
 
 use crate::error::{PlatariumError, Result};
 use crate::core::transaction::Transaction;
 use crate::core::state::State;
 use crate::core::mempool::Mempool;
 
-/// Transaction hash type (alias for String)
+/// Transaction hash type (alias for String).
 pub type TxHash = String;
 
-/// Core execution engine
-/// This is the main entry point for transaction processing
-/// Combines State and Mempool into a single interface
-///
-/// DETERMINISM: This struct ensures that applying the same sequence
-/// of transactions in the same order always produces the same final state.
-/// No randomness or system time is used in the execution path.
+/// Core execution engine: combines state and mempool into a single transaction-processing interface. Applying the same sequence of transactions in the same order always produces the same final state; no randomness or system time is used.
 #[derive(Debug)]
 pub struct Core {
-    /// Blockchain state manager
-    /// INVARIANT: State updates are deterministic and order-dependent
+    /// Blockchain state; updates are deterministic and order-dependent.
     state: State,
-    
-    /// Transaction pool (mempool)
-    /// INVARIANT: Mempool storage order does not affect execution order
+    /// Transaction pool; execution order is determined by the mempool’s sorted batch, not storage order.
     mempool: Mempool,
 }
 
 impl Core {
-    /// Creates a new Core instance with empty state and mempool
+    /// Creates a new Core instance with empty state and mempool.
     pub fn new() -> Self {
         Self {
             state: State::new(),
@@ -58,51 +47,26 @@ impl Core {
         }
     }
     
-    /// Submits a transaction for processing
-    /// 
-    /// Flow:
-    /// 1. Validates the transaction (validate_basic)
-    /// 2. Adds to mempool
-    /// 3. Applies to state immediately
-    /// 
-    /// DETERMINISM GUARANTEE:
-    /// - Same transaction applied in same order → same state result
-    /// - No randomness or system time used
-    /// - All operations are deterministic
-    /// 
-    /// Returns the transaction hash on success
-    /// Returns error if validation fails, transaction is duplicate, or state application fails
+    /// Submits a transaction: validates (validate_basic), adds to mempool, then applies to state. Returns the transaction hash on success. Errors if validation fails, the transaction is a duplicate, or state application fails. Same transaction order yields the same state; no randomness or system time is used.
     pub fn submit_transaction(&self, tx: Transaction) -> Result<TxHash> {
-        // Step 1: Validate transaction
-        // This checks signatures, amount > 0, fee >= min_fee
         tx.validate_basic()
-            .map_err(|e| PlatariumError::from(e))?;
-        
-        // Step 2: Add to mempool
-        // This prevents duplicates and stores the transaction
+            .map_err(PlatariumError::from)?;
         self.mempool.add_transaction(tx.clone())
-            .map_err(|e| PlatariumError::from(e))?;
-        
-        // Step 3: Apply to state immediately
-        // This checks nonce, balance, and updates state atomically
+            .map_err(PlatariumError::from)?;
         self.state.apply_transaction(&tx)
             .map_err(|e| {
-                // If state application fails, remove from mempool
-                // This ensures consistency: transaction is only in mempool if successfully applied
                 let _ = self.mempool.remove_transaction(&tx.hash);
                 e
             })?;
-        
-        // Return transaction hash
         Ok(tx.hash)
     }
     
-    /// Gets the state manager (for direct access if needed)
+    /// Returns a reference to the state manager.
     pub fn state(&self) -> &State {
         &self.state
     }
-    
-    /// Gets the mempool (for direct access if needed)
+
+    /// Returns a reference to the mempool.
     pub fn mempool(&self) -> &Mempool {
         &self.mempool
     }

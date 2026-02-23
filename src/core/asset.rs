@@ -1,29 +1,19 @@
-// Asset module
-// Currency / token model for multi-asset transactions
-//
-// INVARIANTS:
-// - PLP = base network currency
-// - Fee is ALWAYS in μPLP and is NOT an Asset; Asset does not affect fee
-// - No system time or randomness
+//! Asset and currency model for multi-asset transactions. PLP is the base network currency. Fee is always in μPLP and is separate from the transaction asset.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Asset identifier for transaction amount.
-/// Fee is always μPLP and is separate from Asset.
+/// Asset identifier for the transaction amount. Fee is always μPLP and is not represented as an `Asset`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Asset {
-    /// Base network currency (Platarium).
-    /// Amount in minimal units (μPLP); 1 PLP = 1_000_000 μPLP.
+    /// Base network currency (Platarium). Amount in minimal units; 1 PLP = 1_000_000 μPLP.
     PLP,
-
-    /// Other token, e.g. "USDT", "NFT:123".
-    /// Amount in token's minimal units (decimals defined off-chain).
+    /// Other token (e.g. "USDT", "NFT:123"). Amount in the token’s minimal units (decimals defined off-chain).
     Token(String),
 }
 
 impl Asset {
-    /// Canonical string for hashing/ordering (deterministic).
+    /// Returns a canonical string for hashing and ordering (deterministic).
     pub fn as_canonical(&self) -> String {
         match self {
             Asset::PLP => "PLP".to_string(),

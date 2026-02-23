@@ -23,6 +23,7 @@ High-performance cryptographic core library for Platarium Network, implemented i
 - **Transaction Simulation** - Dry-run transactions without modifying global state
 - **Dynamic Fee Calculation** - Load-based fee system with micro-PLP (μPLP) units; fee always μPLP
 - **Deterministic Execution** - Guaranteed reproducibility (no randomness, no system time)
+- **Consensus Building Blocks** - Node registry, dynamic validator selection (L1/L2), L1 confirmation, block assembly, slashing (Modules 1–5)
 - **Zero-Cost Abstractions** - Native performance with Rust's type safety
 
 ## 📦 Installation
@@ -498,22 +499,41 @@ PlatariumCore/
 │   ├── signature.rs        # Signature verification
 │   ├── utils.rs            # Utilities (HKDF, hash, verifyCorrelation)
 │   ├── error.rs            # Error handling
-│   ├── core/               # Transaction processing core
-│   │   ├── mod.rs          # Core execution engine
-│   │   ├── asset.rs        # Asset type (PLP, Token)
-│   │   ├── transaction.rs  # Transaction structure and validation
-│   │   ├── state.rs        # State management and snapshots
-│   │   ├── mempool.rs      # Transaction pool (mempool)
-│   │   ├── execution.rs    # Execution logic and simulation
-│   │   ├── fee.rs          # Fee calculation (micro-PLP)
-│   │   └── determinism.rs  # Determinism audit and enforcement
-│   └── main.rs             # CLI entry point
+│   ├── core/                    # Transaction processing and consensus
+│   │   ├── mod.rs               # Core execution engine
+│   │   ├── asset.rs             # Asset type (PLP, Token)
+│   │   ├── transaction.rs       # Transaction structure and validation
+│   │   ├── state.rs             # State management and snapshots
+│   │   ├── mempool.rs           # Transaction pool (incl. forced inclusion)
+│   │   ├── execution.rs        # Execution logic and simulation
+│   │   ├── fee.rs               # Fee calculation (micro-PLP)
+│   │   ├── determinism.rs       # Determinism audit and enforcement
+│   │   ├── node_registry.rs     # Module 1: Node registry & rating engine
+│   │   ├── validator_selection.rs # Module 2: Dynamic validator selection (L1/L2)
+│   │   ├── confirmation_layer.rs  # Module 3: L1 transaction confirmation
+│   │   ├── block_assembly.rs    # Module 4: Block assembly & L2 block validators
+│   │   └── slashing.rs          # Module 5: Slashing & stability engine
+│   └── main.rs                  # CLI entry point
 ├── tests/
-│   ├── integration_test.rs # Integration tests
-│   ├── module_test.rs      # Module tests
-│   └── run_all_tests.sh    # Test runner script
+│   ├── integration_test.rs     # Integration tests
+│   ├── module_test.rs          # Module tests
+│   └── run_all_tests.sh        # Test runner script
 └── Cargo.toml
 ```
+
+### Consensus and validation (Modules 1–5)
+
+The core includes deterministic, integer-only consensus building blocks (no RNG or system time):
+
+| Module | File | Purpose |
+|--------|------|---------|
+| **1. Node Registry & Rating** | `node_registry.rs` | Validator registry with reputation, load, uptime; scoring and eligibility. |
+| **2. Dynamic Validator Selection** | `validator_selection.rs` | Adaptive L1 (10–25%) and L2 (10–20%) selection by load; weighted selection with seed from block number and global entropy. |
+| **3. L1 Transaction Confirmation** | `confirmation_layer.rs` | L1 verification (balance, nonce, signature, fee); ≥67% confirm; vote aggregation and penalties. |
+| **4. Block Assembly & L2** | `block_assembly.rs` | Block structure (Merkle root, state root, block hash); dynamic limits; L2 block votes (≥70% confirm). |
+| **5. Slashing & Stability** | `slashing.rs` | Penalties for no vote, against majority, equivocation, invalid tx; reputation/stake slashing; suspension. |
+
+Flow: **TX → Mempool → L1 validators → Confirmed TX pool → Block assembler → L2 validators → Block finalized.** See `docs/MODULES_ANALYSIS.md` for details.
 
 ## 🔐 Modules
 

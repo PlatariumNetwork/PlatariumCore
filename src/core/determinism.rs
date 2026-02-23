@@ -1,82 +1,16 @@
-// Determinism audit and enforcement module
-//
-// This module provides documentation and enforcement of determinism guarantees
-// across all execution paths in the Platarium Core.
-//
-// DETERMINISM REQUIREMENTS:
-// =========================
-// 1. NO FLOAT ARITHMETIC: All calculations must use integer arithmetic only
-// 2. NO RANDOM NUMBER GENERATION: No RNG in execution paths
-// 3. NO SYSTEM TIME: No timestamps or time-dependent logic
-// 4. NO UNSORTED HASHMAP ITERATION: All HashMap iterations must be sorted
-//
-// EXECUTION PATHS AUDIT:
-// ======================
-// All execution paths have been audited for determinism:
-//
-// 1. Fee Calculation Path (core/fee.rs):
-//    - Integer arithmetic only (no float)
-//    - No RNG or system time
-//    - No HashMap iteration (uses direct calculations)
-//    - Deterministic: same inputs -> same outputs
-//
-// 2. Transaction Validation Path (core/transaction.rs):
-//    - Integer arithmetic only
-//    - No RNG or system time
-//    - HashSet iteration is sorted before hashing (deterministic)
-//    - Deterministic: same transaction -> same hash
-//
-// 3. State Management Path (core/state.rs):
-//    - Integer arithmetic only
-//    - No RNG or system time
-//    - HashMap iteration is sorted (get_all_balances, get_all_nonces)
-//    - Deterministic: same state -> same snapshot
-//
-// 4. Mempool Path (core/mempool.rs):
-//    - Integer arithmetic only
-//    - No RNG or system time
-//    - get_all_transactions sorts by (arrival_index, tx.hash); see Mempool Fairness & Determinism
-//    - Deterministic: same mempool -> same order; arrival_index never used outside mempool
-//
-// 5. Execution Logic Path (core/execution.rs):
-//    - Integer arithmetic only
-//    - No RNG or system time
-//    - No HashMap iteration
-//    - Deterministic: same state + same transaction -> same result
-//
-// FORBIDDEN OPERATIONS:
-// ====================
-// The following operations are FORBIDDEN in execution paths:
-//
-// 1. Float Types:
-//    - f32, f64 types
-//    - Float arithmetic operations
-//    - Float comparisons
-//
-// 2. Random Number Generation:
-//    - rand::Rng, rand::thread_rng()
-//    - Any RNG in execution paths
-//    - NOTE: RNG is allowed ONLY in key generation (mnemonic.rs, key_generator.rs)
-//      which is NOT part of transaction execution
-//
-// 3. System Time:
-//    - std::time::SystemTime, std::time::Instant
-//    - std::time::Duration (for time-based logic)
-//    - Any timestamp or time-dependent operations
-//
-// 4. Unsorted HashMap Iteration:
-//    - HashMap.iter() without sorting
-//    - HashMap.values() without sorting
-//    - HashMap.keys() without sorting
-//    - Any iteration that depends on HashMap order
-//
-// ENFORCEMENT:
-// ===========
-// Determinism is enforced through:
-// 1. Code review and documentation
-// 2. Compile-time checks (type system prevents some issues)
-// 3. Runtime assertions in critical paths
-// 4. Property tests for deterministic behavior
+//! Determinism audit and enforcement for Platarium Core execution paths.
+//!
+//! # Requirements
+//! - **No float arithmetic:** Integer only (u64, u128, etc.).
+//! - **No RNG** in execution paths (RNG is allowed only in key generation, outside execution).
+//! - **No system time:** No `SystemTime`, `Instant`, or time-based logic.
+//! - **No unsorted iteration:** HashMap/Set iteration must be sorted (e.g. collect and sort by key) before use in hashing or ordering.
+//!
+//! # Audited paths
+//! Fee (fee.rs), transaction (transaction.rs), state (state.rs), mempool (mempool.rs), and execution (execution.rs) have been audited: integer-only, no RNG/time, and sorted iteration where applicable. Same inputs yield the same outputs.
+//!
+//! # Forbidden in execution paths
+//! Float types and arithmetic; RNG; system time or timestamps; unsorted `HashMap`/`HashSet` iteration. Enforcement is via review, documentation, and tests.
 
 /// Verifies that a value is not a float type
 /// 

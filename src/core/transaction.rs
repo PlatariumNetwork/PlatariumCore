@@ -1,23 +1,8 @@
-// Transaction module
-// Canonical transaction format for Platarium Network
-//
-// MULTI-ASSET:
-// ============
-// - Amount: in minimal units of `asset` (PLP or Token). Asset does not affect fee.
-// - Fee: ALWAYS in μPLP only. Fee currency is fixed to μPLP and is not configurable.
-//   - 1 μPLP = 0.000001 PLP; 1 PLP = 1_000_000 μPLP
-// - Reject transaction if fee is not in μPLP or fee = 0.
-//
-// DETERMINISM GUARANTEES:
-// =======================
-// - Hash computation is deterministic: HashSet elements are sorted before hashing
-// - No randomness: hash depends only on transaction data
-// - No system time: transaction does not include timestamps
-// - Same transaction data -> same hash (always)
-//
-// INVARIANTS:
-// - Transaction hash is computed from deterministic data only
-// - Fee is always μPLP; Asset does not affect fee
+//! Canonical transaction format for the Platarium Network.
+//!
+//! **Multi-asset:** Amount is in minimal units of the chosen `asset` (PLP or token); the asset does not affect fee. Fee is always in μPLP (1 PLP = 1_000_000 μPLP). Transactions with non-μPLP fee or zero fee are rejected.
+//!
+//! **Determinism:** Hash is computed deterministically (e.g. set elements sorted before hashing); no randomness or system time. Same transaction data yields the same hash.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -29,7 +14,7 @@ use thiserror::Error;
 /// Minimum transaction fee in μPLP. Fee currency is fixed to μPLP and is not configurable.
 pub const MIN_FEE_UPLP: u128 = 1;
 
-/// Transaction validation errors
+/// Errors produced by transaction validation.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum TransactionValidationError {
     #[error("Invalid signature: {0}")]
@@ -45,11 +30,10 @@ pub enum TransactionValidationError {
     HashMismatch(String, String),
 }
 
-/// Result type for transaction validation
+/// Result type for transaction validation.
 pub type ValidationResult = std::result::Result<(), TransactionValidationError>;
 
-/// Canonical transaction structure
-/// This is the single source of truth for transaction format
+/// Canonical transaction structure (single source of truth for the network format).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Transaction {
     /// Transaction hash (computed from transaction data)
@@ -87,7 +71,7 @@ pub struct Transaction {
 }
 
 impl Transaction {
-    /// Creates a new transaction with computed hash
+    /// Constructs a new transaction and computes its hash.
     pub fn new(
         from: String,
         to: String,

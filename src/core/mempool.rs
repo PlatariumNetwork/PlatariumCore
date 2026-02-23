@@ -1,36 +1,29 @@
-//! Mempool module (Transaction Pool)
-//! Pending transaction management; handles transaction lifecycle before execution.
+//! Mempool (transaction pool): pending transaction storage and ordering before execution.
 //!
-//! ## Mempool Fairness & Determinism
+//! # Forced inclusion (anti-censorship)
+//! Transaction hashes can be enqueued for forced inclusion so they are prioritized when
+//! building the next block. Use `add_forced_inclusion` and `get_transaction_hashes_for_block(max_count)` in block assembly.
 //!
-//! **Why hash-only ordering causes starvation:**  
-//! If transactions are ordered solely by `tx.hash`, those with hashes later in
-//! lexicographic order (e.g. starting with `z`) can be delayed indefinitely when
-//! the mempool is continually filled with transactions whose hashes sort earlier.
+//! # Fairness and determinism
 //!
-//! **Why system time is forbidden:**  
-//! System time (`SystemTime`, `Instant`, timestamps) differs across nodes and
-//! across runs. Using it for ordering would break consensus determinism: same
-//! transaction set could produce different execution order on different nodes.
+//! **Hash-only ordering and starvation:** Ordering solely by `tx.hash` can indefinitely delay
+//! transactions whose hashes sort later (e.g. lexicographically) when the mempool is continuously refilled with earlier-sorting hashes.
 //!
-//! **`arrival_index`:**  
-//! A monotonic, local counter incremented on each successful `add_transaction()`.
-//! It is NOT derived from system time, NOT included in tx hash/signatures/state/
-//! consensus. It is used ONLY inside the mempool to achieve rough arrival-order
-//! fairness. Same mempool contents → same `(arrival_index, tx.hash)` → same
-//! sorted batch → same execution order.
+//! **No system time:** System time differs across nodes and runs. Using it for ordering would
+//! break consensus determinism (same transaction set could yield different execution order on different nodes).
 //!
-//! **Separation of concerns:**
-//! - **Mempool** = fairness & liveness (arrival-order scheduling, no starvation).
-//! - **Execution** = determinism & consensus (order from sorted batch only;
-//!   execution layer receives only `Transaction`, never `arrival_index`).
+//! **`arrival_index`:** A monotonic, node-local counter incremented on each successful `add_transaction()`.
+//! It is not derived from system time and is not part of tx hash, signatures, state, or consensus.
+//! It is used only inside the mempool for arrival-order fairness. Same mempool contents yield the same
+//! `(arrival_index, tx.hash)` ordering and thus the same execution order.
 //!
-//! DETERMINISM: No randomness; no system time. Same mempool → same order.
-
-// INVARIANTS:
-// - Transaction storage is deterministic (by hash lookup)
-// - Execution order is derived from sorted batch (see above)
-// - arrival_index is NEVER used outside this module
+//! **Separation of concerns:** The mempool handles fairness and liveness (arrival-order scheduling);
+//! the execution layer receives only the sorted batch of transactions and never `arrival_index`.
+//!
+//! # Invariants
+//! - Storage is keyed by transaction hash (deterministic lookup).
+//! - Execution order is derived from the sorted batch produced by this module.
+//! - `arrival_index` is never exposed outside this module.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -38,19 +31,16 @@ use crate::error::{PlatariumError, Result};
 use crate::core::transaction::Transaction;
 use thiserror::Error;
 
-/// Mempool-internal entry: transaction plus logical arrival order.
+/// Internal mempool entry: transaction and its logical arrival order.
 ///
-/// arrival_index:
-/// - Monotonically increasing, local to this node.
-/// - NOT derived from system time; NOT used in hash, signatures, state, or consensus.
-/// - Used ONLY for fair ordering inside the mempool.
+/// `arrival_index` is monotonic and node-local; it is not derived from system time and is not used in hashes, signatures, state, or consensus. It is used only for fair ordering within the mempool.
 #[derive(Debug, Clone)]
 pub struct MempoolEntry {
     pub tx: Transaction,
     pub arrival_index: u64,
 }
 
-/// Mempool-specific errors
+/// Errors produced by the mempool.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum MempoolError {
     #[error("Duplicate transaction: transaction with hash {0} already exists")]
@@ -66,35 +56,33 @@ impl From<MempoolError> for PlatariumError {
     }
 }
 
-/// Transaction Pool (Mempool)
-/// Stores pending transactions before they are executed
-/// Thread-safe implementation using RwLock
+/// Maximum number of transaction hashes in the forced-inclusion queue.
+const FORCED_INCLUSION_CAP: usize = 256;
+
+/// Thread-safe transaction pool (mempool) for pending transactions before execution.
 #[derive(Debug)]
 pub struct Mempool {
-    /// Pending transactions: hash -> entry (tx + arrival_index)
+    /// Pending transactions keyed by hash; each entry includes the transaction and its arrival index.
     transactions: RwLock<HashMap<String, MempoolEntry>>,
-    /// Monotonic counter for logical arrival order. Incremented on each add_transaction.
-    /// Never reset; not used outside mempool.
+    /// Monotonic counter for logical arrival order; incremented on each successful add. Not exposed outside this module.
     next_arrival_index: RwLock<u64>,
+    /// Forced-inclusion queue (anti-censorship): these hashes are prioritized when building the next block.
+    forced_inclusion: RwLock<Vec<String>>,
 }
 
 impl Mempool {
-    /// Creates a new empty mempool
+    /// Creates a new empty mempool.
     pub fn new() -> Self {
         Self {
             transactions: RwLock::new(HashMap::new()),
             next_arrival_index: RwLock::new(0),
+            forced_inclusion: RwLock::new(Vec::new()),
         }
     }
 
-    /// Adds a transaction to the mempool
-    /// Returns error if transaction already exists (duplicate)
+    /// Adds a transaction to the mempool. Errors if a transaction with the same hash already exists.
     ///
-    /// This method:
-    /// - Prevents duplicates by checking transaction hash
-    /// - Assigns a monotonically increasing arrival_index (local, not from system time)
-    /// - Stores the transaction in pending state
-    /// - Does NOT validate or execute the transaction
+    /// Assigns a monotonic `arrival_index` (node-local, not from system time), stores the transaction, and does not validate or execute it.
     pub fn add_transaction(&self, tx: Transaction) -> Result<()> {
         let mut transactions = self.transactions.write().unwrap();
         let mut next = self.next_arrival_index.write().unwrap();
@@ -113,23 +101,19 @@ impl Mempool {
         Ok(())
     }
 
-    /// Gets a transaction by hash
-    /// Returns None if transaction doesn't exist
-    /// Execution layer receives only Transaction; arrival_index is never exposed.
+    /// Returns the transaction for the given hash, if present. The execution layer receives only the transaction; `arrival_index` is not exposed.
     pub fn get_transaction(&self, hash: &str) -> Option<Transaction> {
         let transactions = self.transactions.read().unwrap();
         transactions.get(hash).map(|e| e.tx.clone())
     }
 
-    /// Removes a transaction from the mempool
-    /// Typically called after transaction is executed
+    /// Removes a transaction from the mempool by hash. Typically called after the transaction has been executed.
     pub fn remove_transaction(&self, hash: &str) -> bool {
         let mut transactions = self.transactions.write().unwrap();
         transactions.remove(hash).is_some()
     }
 
-    /// Removes multiple transactions from the mempool
-    /// Typically called after transactions are executed in a block
+    /// Removes the given transactions from the mempool. Typically called after they have been executed in a block.
     pub fn remove_transactions(&self, hashes: &[String]) {
         let mut transactions = self.transactions.write().unwrap();
         for hash in hashes {
@@ -137,15 +121,7 @@ impl Mempool {
         }
     }
 
-    /// Gets all pending transactions in fair, deterministic order.
-    ///
-    /// Sort: (arrival_index ASC, tx.hash ASC). arrival_index provides fairness;
-    /// tx.hash is the final tiebreaker for determinism.
-    ///
-    /// Execution layer receives only `Transaction`; ordering is derived from this
-    /// sorted batch. Same batch → same execution order → same state.
-    ///
-    /// INVARIANT: Same mempool contents → same returned order.
+    /// Returns all pending transactions in a fair, deterministic order: sorted by (arrival_index, tx.hash). Same mempool contents yield the same order; the execution layer receives only the transaction list.
     pub fn get_all_transactions(&self) -> Vec<Transaction> {
         let transactions = self.transactions.read().unwrap();
         let mut entries: Vec<MempoolEntry> = transactions.values().cloned().collect();
@@ -155,28 +131,68 @@ impl Mempool {
         entries.into_iter().map(|e| e.tx).collect()
     }
     
-    /// Gets the number of pending transactions
+    /// Returns the number of pending transactions.
     pub fn len(&self) -> usize {
         let transactions = self.transactions.read().unwrap();
         transactions.len()
     }
     
-    /// Checks if mempool is empty
+    /// Returns whether the mempool is empty.
     pub fn is_empty(&self) -> bool {
         let transactions = self.transactions.read().unwrap();
         transactions.is_empty()
     }
     
-    /// Checks if a transaction exists in the mempool
+    /// Returns whether a transaction with the given hash is in the mempool.
     pub fn contains(&self, hash: &str) -> bool {
         let transactions = self.transactions.read().unwrap();
         transactions.contains_key(hash)
     }
     
-    /// Clears all transactions from the mempool
+    /// Removes all transactions from the mempool.
     pub fn clear(&self) {
         let mut transactions = self.transactions.write().unwrap();
         transactions.clear();
+    }
+
+    /// Adds a transaction hash to the forced-inclusion queue (anti-censorship). No effect if the queue is at capacity or the hash is already enqueued.
+    pub fn add_forced_inclusion(&self, tx_hash: String) {
+        let mut q = self.forced_inclusion.write().unwrap();
+        if q.len() < FORCED_INCLUSION_CAP && !q.contains(&tx_hash) {
+            q.push(tx_hash);
+        }
+    }
+
+    /// Returns a copy of the forced-inclusion queue (order preserved).
+    pub fn get_forced_inclusion(&self) -> Vec<String> {
+        self.forced_inclusion.read().unwrap().clone()
+    }
+
+    /// Removes the given hashes from the forced-inclusion queue (e.g. after they were included in a block).
+    pub fn remove_forced_inclusion(&self, hashes: &[String]) {
+        let mut q = self.forced_inclusion.write().unwrap();
+        let set: std::collections::HashSet<_> = hashes.iter().collect();
+        q.retain(|h| !set.contains(h));
+    }
+
+    /// Returns transaction hashes for block assembly: forced-inclusion entries that are still in the mempool first, then others up to `max_count`. Deterministic for the same mempool and forced-inclusion state.
+    pub fn get_transaction_hashes_for_block(&self, max_count: usize) -> Vec<String> {
+        use std::collections::HashSet;
+        let forced = self.get_forced_inclusion();
+        let all_txs = self.get_all_transactions();
+        let in_mempool: HashSet<_> = all_txs.iter().map(|t| t.hash.as_str()).collect();
+        let mut result: Vec<String> = forced.into_iter().filter(|h| in_mempool.contains(h.as_str())).collect();
+        let mut used: HashSet<String> = result.iter().cloned().collect();
+        for tx in all_txs {
+            if result.len() >= max_count {
+                break;
+            }
+            let hash = tx.hash.clone();
+            if used.insert(hash.clone()) {
+                result.push(hash);
+            }
+        }
+        result
     }
 }
 
