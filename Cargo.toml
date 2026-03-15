@@ -52,3 +52,6 @@ clap = { version = "4.5", features = ["derive"] }
 name = "integration"
 path = "tests/integration_test.rs"
 
+[[test]]
+name = "determinism_invariants"
+path = "tests/determinism_invariants_test.rs"

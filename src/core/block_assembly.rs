@@ -1,7 +1,18 @@
-//! Block Assembly & Level 2 Block Validators (Module 4).
+//! Block Assembly Logic & L2 Block Validator Voting (Module 4).
+//!
+//! **Validation Modules Analysis — Step 4:** Module that:
+//! - **Forms a block** from a list of TX hashes: `assemble_block(block_number, previous_hash, timestamp, transaction_hashes, state_snapshot, producer_id, producer_sig)`.
+//! - **L2 validators** are a separate group (from Step 2: `select_validators_l2` / `select_l1_l2_validators`).
+//! - **L2 block voting** ≥70%: `process_l2_block_votes(votes)` → `(BlockConfirmationResult, to_penalize)`.
+//! - **Finalize or reject block:** result is `BlockConfirmationResult::Confirmed` (finalize) or `Rejected` (reject); use `block_finalized(result)` to check.
+//!
+//! **Step 8 — Block Leader Rotation & BFT-style Finality:**
+//! - **Leader rotation:** `block_leader_for_height(block_number, l2_validators)` returns the deterministic leader for that height (round-robin over the L2 set). The **leader proposes the block** (`producer_id` in `Block`).
+//! - **L2 group** conducts **HotStuff-style voting:** validators vote Confirm/Reject on the proposed block; votes are aggregated with `process_l2_block_votes`.
+//! - **Block is final** after **≥70%** Confirm votes (`L2_CONFIRM_THRESHOLD_PCT`). This provides **safety and deterministic finalization** (BFT-style finality).
 //!
 //! Assembles blocks with dynamic limits (max transactions, size, and time window 2–5 s) derived from mempool size, average TPS, and network load.
-//! Block structure includes Merkle root, state root, block hash, and producer signature. L2 uses a separate validator pool (10–20%, excluding L1) with a 70% confirmation threshold.
+//! Block structure includes Merkle root, state root, block hash, and producer signature.
 
 use sha2::{Sha256, Digest};
 use crate::core::node_registry::{NodeId, NodeRegistry};
@@ -9,8 +20,27 @@ use crate::core::state::StateSnapshot;
 use crate::error::{PlatariumError, Result};
 use thiserror::Error;
 
-/// L2 block confirmation threshold: at least this percentage of validators must vote Confirm.
+/// L2 block confirmation threshold: at least this percentage of validators must vote Confirm (BFT-style finality: block is final after ≥70%).
 pub const L2_CONFIRM_THRESHOLD_PCT: u64 = 70;
+
+/// Block leader rotation (Step 8): returns the leader for the given height. Deterministic round-robin over `l2_validators` (must be in canonical order, e.g. from `select_validators_l2`). The leader proposes the block; L2 then votes (HotStuff-style); block is final after ≥70% votes.
+#[inline]
+pub fn block_leader_for_height(block_number: u64, l2_validators: &[NodeId]) -> Option<NodeId> {
+    if l2_validators.is_empty() {
+        return None;
+    }
+    let idx = (block_number as usize) % l2_validators.len();
+    Some(l2_validators[idx].clone())
+}
+
+/// Returns the index of the block leader in the L2 validator list for the given height (for testing or display).
+#[inline]
+pub fn block_leader_index_for_height(block_number: u64, num_validators: usize) -> usize {
+    if num_validators == 0 {
+        return 0;
+    }
+    (block_number as usize) % num_validators
+}
 
 /// Block time bounds (seconds). Actual window is chosen dynamically in this range.
 pub const BLOCK_TIME_MIN_SEC: u64 = 2;
@@ -173,11 +203,19 @@ pub fn assemble_block(
 /// L2 block vote type (Confirm/Reject), re-exported from the confirmation layer.
 pub use crate::core::confirmation_layer::Vote;
 
-/// Outcome of L2 block confirmation.
+/// Outcome of L2 block confirmation: finalize (accept) or reject the block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockConfirmationResult {
+    /// Block is accepted; finalize it.
     Confirmed,
+    /// Block is rejected; do not finalize.
     Rejected,
+}
+
+/// Returns true if the block should be finalized (accepted), false if rejected.
+#[inline]
+pub fn block_finalized(result: BlockConfirmationResult) -> bool {
+    result == BlockConfirmationResult::Confirmed
 }
 
 /// Aggregates L2 block votes. If at least 70% vote Confirm, the block is confirmed; otherwise rejected. Returns the list of nodes to penalize (voted against the majority).
@@ -259,5 +297,34 @@ mod tests {
             .collect();
         let (res, _) = process_l2_block_votes(&votes).unwrap();
         assert_eq!(res, BlockConfirmationResult::Rejected);
+    }
+
+    #[test]
+    fn test_block_finalized() {
+        assert!(block_finalized(BlockConfirmationResult::Confirmed));
+        assert!(!block_finalized(BlockConfirmationResult::Rejected));
+    }
+
+    #[test]
+    fn test_block_leader_rotation() {
+        let l2: Vec<NodeId> = vec!["n0".into(), "n1".into(), "n2".into()];
+        assert_eq!(block_leader_for_height(0, &l2).as_deref(), Some("n0"));
+        assert_eq!(block_leader_for_height(1, &l2).as_deref(), Some("n1"));
+        assert_eq!(block_leader_for_height(2, &l2).as_deref(), Some("n2"));
+        assert_eq!(block_leader_for_height(3, &l2).as_deref(), Some("n0"));
+        assert_eq!(block_leader_for_height(100, &l2).as_deref(), Some("n1"));
+    }
+
+    #[test]
+    fn test_block_leader_empty() {
+        let l2: Vec<NodeId> = vec![];
+        assert!(block_leader_for_height(0, &l2).is_none());
+    }
+
+    #[test]
+    fn test_block_leader_index_for_height() {
+        assert_eq!(block_leader_index_for_height(0, 3), 0);
+        assert_eq!(block_leader_index_for_height(3, 3), 0);
+        assert_eq!(block_leader_index_for_height(5, 3), 2);
     }
 }

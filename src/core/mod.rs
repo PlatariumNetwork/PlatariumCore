@@ -20,6 +20,7 @@ pub mod validator_selection;
 pub mod confirmation_layer;
 pub mod block_assembly;
 pub mod slashing;
+pub mod tx_assignment;
 
 use crate::error::{PlatariumError, Result};
 use crate::core::transaction::Transaction;

@@ -1,16 +1,29 @@
 //! Dynamic Validator Selection Engine (Module 2).
 //!
+//! **Validation Modules Analysis — Step 2:** Uses reputation and load to determine the validator list.
+//! API:
+//! - `compute_seed(block_number, prev_finalized_hash)` — seed from block number and previous finalized block hash (pass hash as bytes).
+//! - `selection_percent_from_load(current_tps, capacity)` — returns selection percent (10–50% for L1 when load 0, else 10–30%; 10–20% for L2).
+//! - `select_validators(registry, seed, percent)` — returns list of L1 validators; use `select_validators_l2` for L2 (excluding L1).
+//! - `select_l1_l2_validators(...)` — convenience: returns (L1 list, L2 list) in one call.
+//!
+//! **Step 9 — Deterministic Randomness for Validator Selection:**
+//! - **global_entropy = hash(prev_finalized_block)** — use the previous finalized block hash (e.g. block hash bytes) as global entropy.
+//! - **seed = SHA256(block_number || global_entropy)** — canonical seed for committee selection (see `compute_seed` / `committee_selection_seed`).
+//! - **Deterministic selection** for L1 and L2: same (block_number, prev_finalized_block_hash, registry, load) yields the same committees.
+//! Every node can **reproduce the same seed and verify** that the L1/L2 committees were selected correctly.
+//!
 //! Adjusts the fraction of selected validators according to system load (TPS vs capacity):
 //! higher load yields fewer validators to reduce coordination and speed up finalization.
-//! Selection is deterministic: `hash(block_number, global_entropy)` with weights
+//! Selection is deterministic: `hash(block_number, prev_finalized_hash)` with weights
 //! `ReputationScore / LoadScore`; verifiable by all, not manipulable by the current producer.
 //!
 //! # Entropy
-//! Pass `global_entropy` from the **previous finalized block** (e.g. block hash or commitment)
+//! Pass `prev_finalized_hash` (or `global_entropy`) from the **previous finalized block** (e.g. block hash)
 //! so that selection is reproducible and independent of the current block producer.
 //!
 //! # Determinism
-//! Same inputs (current_tps, system_capacity, eligible set, block_number, global_entropy)
+//! Same inputs (current_tps, capacity, eligible set, block_number, prev_finalized_hash)
 //! produce the same selected set. Integer-only arithmetic; no floating point, system time, or RNG.
 //! Selection uses SHA256(seed || round) for reproducible weighted sampling.
 //!
@@ -25,7 +38,8 @@ use crate::error::{PlatariumError, Result};
 use thiserror::Error;
 
 /// Load tier boundaries (TPS as % of capacity). Higher load selects fewer validators.
-/// TPS &lt; 30% → 25%; &lt; 60% → 20%; &lt; 85% → 15%; otherwise → 10%.
+/// load 0 → 50%; &lt; 20% → 30%; &lt; 30% → 25%; &lt; 60% → 20%; &lt; 85% → 15%; otherwise → 10%.
+pub const TIER_VERY_LOW_PCT: u64 = 20;
 pub const TIER_LOW_PCT: u64 = 30;
 pub const TIER_MID_PCT: u64 = 60;
 pub const TIER_HIGH_PCT: u64 = 85;
@@ -33,12 +47,18 @@ pub const SELECT_PCT_10: u64 = 10;
 pub const SELECT_PCT_15: u64 = 15;
 pub const SELECT_PCT_20: u64 = 20;
 pub const SELECT_PCT_25: u64 = 25;
+pub const SELECT_PCT_30: u64 = 30;
+/// When load is 0, more validators participate (not a constant 3 in analytics).
+pub const SELECT_PCT_50: u64 = 50;
 
 /// L2 block validator selection percentages (10–20%); pool is disjoint from L1.
 pub const L2_SELECT_PCT_10: u64 = 10;
 pub const L2_SELECT_PCT_12: u64 = 12;
 pub const L2_SELECT_PCT_15: u64 = 15;
 pub const L2_SELECT_PCT_20: u64 = 20;
+
+/// Minimum committee size when there are enough candidates (consensus 67%/70% meaningful).
+pub const MIN_COMMITTEE_FOR_CONSENSUS: usize = 3;
 
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum SelectionError {
@@ -55,14 +75,42 @@ impl From<SelectionError> for PlatariumError {
     }
 }
 
-/// Derives the L1 selection percentage (10, 15, 20, or 25) from current TPS and system capacity.
-/// Higher load yields a lower percentage. `system_capacity` must be positive.
+/// Gateway API: selection percent from load percentage only (0..100). Uses same tiers as selection_percent_from_load.
+/// So Go Gateway calls Core instead of duplicating logic; load_pct = LoadScore×100/SCORE_SCALE.
+pub fn selection_percent_from_load_pct(load_pct: u64) -> Result<u64> {
+    selection_percent_from_load(load_pct, 100)
+}
+
+/// Gateway API: committee size from candidate count and load. All consensus logic in Core.
+/// Not a constant: count = (candidates × selection_percent) / 100; when candidates >= 3
+/// at least MIN_COMMITTEE_FOR_CONSENSUS (3). So: from 3, then by % of total nodes.
+pub fn committee_count(candidate_count: usize, load_pct: u64) -> usize {
+    if candidate_count == 0 {
+        return 0;
+    }
+    let percent = selection_percent_from_load_pct(load_pct).unwrap_or(SELECT_PCT_10);
+    let mut count = (candidate_count as u64 * percent) as usize / 100;
+    if count < 1 {
+        count = 1;
+    }
+    if candidate_count >= MIN_COMMITTEE_FOR_CONSENSUS && count < MIN_COMMITTEE_FOR_CONSENSUS {
+        count = MIN_COMMITTEE_FOR_CONSENSUS;
+    }
+    count.min(candidate_count)
+}
+
+/// Derives the L1 selection percentage (10–50%) from current TPS and system capacity.
+/// Higher load yields a lower percentage. load 0 → 50% so analytics is not constant 3.
 pub fn selection_percent_from_load(current_tps: u64, system_capacity: u64) -> Result<u64> {
     if system_capacity == 0 {
         return Err(SelectionError::ZeroCapacity.into());
     }
     let load_pct = (current_tps * 100) / system_capacity;
-    let pct = if load_pct < TIER_LOW_PCT {
+    let pct = if load_pct == 0 {
+        SELECT_PCT_50
+    } else if load_pct < TIER_VERY_LOW_PCT {
+        SELECT_PCT_30
+    } else if load_pct < TIER_LOW_PCT {
         SELECT_PCT_25
     } else if load_pct < TIER_MID_PCT {
         SELECT_PCT_20
@@ -74,7 +122,8 @@ pub fn selection_percent_from_load(current_tps: u64, system_capacity: u64) -> Re
     Ok(pct)
 }
 
-/// Computes the L1 selection seed: SHA256(block_number_le || global_entropy).
+/// Computes the L1 selection seed: **seed = SHA256(block_number_le || global_entropy)**.
+/// Pass **global_entropy = hash(prev_finalized_block)** (the previous finalized block hash as bytes) so that committee selection is reproducible and every node can verify L1/L2 committees (Step 9).
 pub fn compute_seed(block_number: u64, global_entropy: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(block_number.to_le_bytes());
@@ -83,6 +132,12 @@ pub fn compute_seed(block_number: u64, global_entropy: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&h);
     out
+}
+
+/// **Step 9 — Deterministic committee selection seed.** Same as `compute_seed`: **seed = SHA256(block_number || global_entropy)** with **global_entropy = hash(prev_finalized_block)**. Use this seed for `select_validators_with_percent` (L1) and L2 selection so that every node can verify committees.
+#[inline]
+pub fn committee_selection_seed(block_number: u64, global_entropy: &[u8]) -> [u8; 32] {
+    compute_seed(block_number, global_entropy)
 }
 
 /// Computes the L2 selection seed (distinct from L1 so L1 and L2 validator sets differ).
@@ -190,6 +245,34 @@ struct WeightedNode {
     weight: u64,
 }
 
+/// Gateway API: select n node ids from (node_id, weight) pairs using Core's deterministic weighted selection.
+/// Seed is 32 bytes. Used by Go Gateway so committee selection lives in Core.
+pub fn select_n_by_weight(
+    candidates: Vec<(NodeId, u64)>,
+    seed: &[u8; 32],
+    n: usize,
+) -> Vec<NodeId> {
+    if n == 0 || candidates.is_empty() {
+        return Vec::new();
+    }
+    let weighted: Vec<WeightedNode> = candidates
+        .into_iter()
+        .map(|(node_id, weight)| WeightedNode {
+            node_id,
+            weight: weight.max(1),
+        })
+        .collect();
+    let total_weight: u64 = weighted.iter().map(|w| w.weight).sum();
+    if total_weight == 0 {
+        return Vec::new();
+    }
+    let mut count = n.min(weighted.len());
+    if weighted.len() >= MIN_COMMITTEE_FOR_CONSENSUS && count < MIN_COMMITTEE_FOR_CONSENSUS {
+        count = MIN_COMMITTEE_FOR_CONSENSUS.min(weighted.len());
+    }
+    weighted_select_n(weighted, total_weight, count, seed)
+}
+
 /// Selects N distinct nodes by deterministic weighted sampling. Uses cumulative weights and binary search.
 /// Result is sorted by node_id. For very large sets, a tree-based structure can reduce complexity (see module docs).
 fn weighted_select_n(
@@ -229,23 +312,13 @@ fn weighted_select_n(
     selected
 }
 
-/// Performs dynamic validator selection: the number of validators is derived from TPS/capacity, then nodes are chosen by deterministic weighted sampling.
-///
-/// - `registry`: node registry (only Active nodes are eligible).
-/// - `current_tps`: current transactions per second (or per slot).
-/// - `system_capacity`: maximum TPS or capacity (must be positive).
-/// - `block_number`: current block number, used in the seed.
-/// - `global_entropy`: optional entropy (e.g. from previous block or beacon); may be empty.
-///
-/// Returns a sorted list of selected node ids. The result is deterministic and verifiable.
-pub fn select_validators(
+/// Selects L1 validators given precomputed seed and percent (Step 2 API: select_validators(registry, seed, percent)).
+/// Returns a sorted list of node ids. Deterministic.
+pub fn select_validators_with_percent(
     registry: &NodeRegistry,
-    current_tps: u64,
-    system_capacity: u64,
-    block_number: u64,
-    global_entropy: &[u8],
+    seed: &[u8; 32],
+    percent: u64,
 ) -> Result<Vec<NodeId>> {
-    let percent = selection_percent_from_load(current_tps, system_capacity)?;
     let eligible = registry.get_eligible();
     let count = select_count(eligible.len(), percent);
 
@@ -270,9 +343,50 @@ pub fn select_validators(
         return Ok(Vec::new());
     }
 
-    let seed = compute_seed(block_number, global_entropy);
-    let selected = weighted_select_n(weighted, total_weight, count, &seed);
+    let selected = weighted_select_n(weighted, total_weight, count, seed);
     Ok(selected)
+}
+
+/// Returns (L1 validators, L2 validators) in one call. L2 set is disjoint from L1.
+/// Uses `block_number`, `prev_finalized_hash` (e.g. previous block hash bytes), `current_tps`, and `capacity`.
+pub fn select_l1_l2_validators(
+    registry: &NodeRegistry,
+    block_number: u64,
+    prev_finalized_hash: &[u8],
+    current_tps: u64,
+    capacity: u64,
+) -> Result<(Vec<NodeId>, Vec<NodeId>)> {
+    let l1 = select_validators(registry, current_tps, capacity, block_number, prev_finalized_hash)?;
+    let l2 = select_validators_l2(
+        registry,
+        current_tps,
+        capacity,
+        block_number,
+        prev_finalized_hash,
+        &l1,
+    )?;
+    Ok((l1, l2))
+}
+
+/// Performs dynamic validator selection: the number of validators is derived from TPS/capacity, then nodes are chosen by deterministic weighted sampling.
+///
+/// - `registry`: node registry (only Active nodes are eligible).
+/// - `current_tps`: current transactions per second (or per slot).
+/// - `system_capacity`: maximum TPS or capacity (must be positive).
+/// - `block_number`: current block number, used in the seed.
+/// - `global_entropy`: previous finalized block hash or other entropy bytes; may be empty.
+///
+/// Returns a sorted list of selected node ids (L1 validators). The result is deterministic and verifiable.
+pub fn select_validators(
+    registry: &NodeRegistry,
+    current_tps: u64,
+    system_capacity: u64,
+    block_number: u64,
+    global_entropy: &[u8],
+) -> Result<Vec<NodeId>> {
+    let percent = selection_percent_from_load(current_tps, system_capacity)?;
+    let seed = compute_seed(block_number, global_entropy);
+    select_validators_with_percent(registry, &seed, percent)
 }
 
 #[cfg(test)]
@@ -281,7 +395,12 @@ mod tests {
 
     #[test]
     fn test_selection_percent_tiers() {
-        // Low load → most validators (25%)
+        // Zero load → 50% (so analytics is not constant 3)
+        assert_eq!(selection_percent_from_load(0, 100).unwrap(), SELECT_PCT_50);
+        // Very low load → 30%
+        assert_eq!(selection_percent_from_load(10, 100).unwrap(), SELECT_PCT_30);
+        assert_eq!(selection_percent_from_load(19, 100).unwrap(), SELECT_PCT_30);
+        // < 30% → 25%
         assert_eq!(selection_percent_from_load(20, 100).unwrap(), SELECT_PCT_25);
         assert_eq!(selection_percent_from_load(29, 100).unwrap(), SELECT_PCT_25);
         // < 60% → 20%
@@ -320,6 +439,16 @@ mod tests {
     }
 
     #[test]
+    fn test_committee_selection_seed_step9() {
+        let global_entropy = b"hash_of_prev_finalized_block";
+        let seed1 = committee_selection_seed(1, global_entropy);
+        let seed2 = compute_seed(1, global_entropy);
+        assert_eq!(seed1, seed2);
+        let seed3 = committee_selection_seed(1, global_entropy);
+        assert_eq!(seed1, seed3);
+    }
+
+    #[test]
     fn test_select_validators_deterministic() {
         let reg = NodeRegistry::new();
         reg.register("n1".into(), "pk1".into(), 1000, 10).unwrap();
@@ -345,5 +474,28 @@ mod tests {
         let low_load = select_validators(&reg, 10, 100, 1, b"").unwrap();
         let high_load = select_validators(&reg, 90, 100, 1, b"").unwrap();
         assert!(high_load.len() <= low_load.len()); // higher load → fewer validators
+    }
+
+    #[test]
+    fn test_select_validators_with_percent() {
+        let reg = NodeRegistry::new();
+        reg.register("n1".into(), "pk1".into(), 1000, 10).unwrap();
+        reg.register("n2".into(), "pk2".into(), 1000, 10).unwrap();
+        let seed = compute_seed(1, b"prev_hash");
+        let list = select_validators_with_percent(&reg, &seed, 25).unwrap();
+        assert!(list.len() <= 2);
+        assert!(list.iter().all(|id| *id == "n1" || *id == "n2"));
+    }
+
+    #[test]
+    fn test_select_l1_l2_validators() {
+        let reg = NodeRegistry::new();
+        for i in 0..10 {
+            reg.register(format!("n{}", i), format!("pk{}", i), 1000, 10).unwrap();
+        }
+        let (l1, l2) = select_l1_l2_validators(&reg, 1, b"hash", 50, 100).unwrap();
+        let l1_set: std::collections::HashSet<_> = l1.iter().cloned().collect();
+        let l2_set: std::collections::HashSet<_> = l2.iter().cloned().collect();
+        assert!(l1_set.is_disjoint(&l2_set));
     }
 }

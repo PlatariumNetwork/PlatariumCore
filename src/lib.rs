@@ -19,7 +19,7 @@ pub use core::{Core, TxHash};
 pub use core::asset::Asset;
 pub use core::transaction::Transaction;
 pub use core::state::{State, Address, StateSnapshot, SnapshotableState, TREASURY_ADDRESS};
-pub use core::mempool::Mempool;
+pub use core::mempool::{Mempool, MAX_FORCED_INCLUSION_QUEUE};
 pub use core::execution::{ExecutionContext, ExecutionLogic, ExecutionError, ExecutionResult};
 pub use core::fee::{
     MicroPLP,
@@ -51,13 +51,20 @@ pub use core::node_registry::{
 };
 pub use core::validator_selection::{
     select_validators,
+    select_validators_with_percent,
     select_validators_l2,
+    select_l1_l2_validators,
     select_count,
+    select_n_by_weight,
+    committee_count,
     selection_percent_from_load,
+    selection_percent_from_load_pct,
     selection_percent_from_load_l2,
     compute_seed,
+    committee_selection_seed,
     compute_seed_l2,
     SelectionError,
+    TIER_VERY_LOW_PCT,
     TIER_LOW_PCT,
     TIER_MID_PCT,
     TIER_HIGH_PCT,
@@ -65,6 +72,7 @@ pub use core::validator_selection::{
     SELECT_PCT_15,
     SELECT_PCT_20,
     SELECT_PCT_25,
+    SELECT_PCT_30,
     L2_SELECT_PCT_10,
     L2_SELECT_PCT_12,
     L2_SELECT_PCT_15,
@@ -82,6 +90,9 @@ pub use core::confirmation_layer::{
 };
 pub use core::block_assembly::{
     Block,
+    block_finalized,
+    block_leader_for_height,
+    block_leader_index_for_height,
     BLOCK_TIME_MIN_SEC,
     BLOCK_TIME_MAX_SEC,
     L2_CONFIRM_THRESHOLD_PCT,
@@ -103,4 +114,16 @@ pub use core::slashing::{
     apply_slash_batch,
     penalty_amounts,
     SlashingError,
+};
+pub use core::tx_assignment::{
+    required_stake_for_tx,
+    required_stake_for_amount,
+    min_validator_stake_for_tx,
+    min_validator_stake_for_amount,
+    form_verifier_groups,
+    assign_transactions_to_groups,
+    TxGroupAssignment,
+    TxAssignmentError,
+    DEFAULT_MIN_REQUIRED_STAKE,
+    DEFAULT_MIN_VALIDATOR_STAKE,
 };

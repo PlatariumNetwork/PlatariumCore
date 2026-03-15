@@ -1,7 +1,16 @@
-//! Node Registry & Rating Engine (Module 1).
+//! Node Registry & Reputation Engine (Module 1).
+//!
+//! **Validation Modules Analysis — Step 1:** Registry that stores per-node identity, stake,
+//! reputation/uptime/latency/load scores, and vote statistics. Supports register, unregister,
+//! set scores (batch and individual), and get_eligible for consensus validator selection.
 //!
 //! Maintains the validator node registry with reputation, load, and uptime metrics.
 //! All scoring uses integer arithmetic; no floating point or non-deterministic inputs.
+//!
+//! # Stored fields
+//! - `node_id`, `public_key` — identity
+//! - `stake`, `reputation_score`, `uptime_score`, `latency_score`, `load_score`
+//! - `missed_votes`, `total_votes` (vote accuracy = (total - missed) / total)
 //!
 //! # Determinism
 //! - Scores use a fixed scale of 1_000_000 (0 = 0.0, 1_000_000 = 1.0).
@@ -253,6 +262,54 @@ impl NodeRegistry {
         Ok(())
     }
 
+    /// Sets multiple scores in one call (Step 1: "set scores"). Optional load update via `(current_tasks, max_capacity)`.
+    /// All score values must be in `0..=SCORE_SCALE`.
+    pub fn set_scores(
+        &self,
+        node_id: &NodeId,
+        uptime_score: u64,
+        latency_score: u64,
+        load: Option<(u64, u64)>,
+    ) -> Result<()> {
+        if uptime_score > SCORE_SCALE {
+            return Err(NodeRegistryError::InvalidScore(SCORE_SCALE, uptime_score).into());
+        }
+        if latency_score > SCORE_SCALE {
+            return Err(NodeRegistryError::InvalidScore(SCORE_SCALE, latency_score).into());
+        }
+        let max_stake = self.max_stake();
+        let mut nodes = self.nodes.write().unwrap();
+        let node = nodes.get_mut(node_id).ok_or_else(|| NodeRegistryError::NodeNotFound(node_id.clone()))?;
+        node.uptime_score = uptime_score;
+        node.latency_score = latency_score;
+        if let Some((current_tasks, max_capacity)) = load {
+            node.current_tasks = current_tasks;
+            node.max_capacity = max_capacity.max(1);
+            node.recompute_load_score();
+        }
+        node.compute_reputation(max_stake);
+        Ok(())
+    }
+
+    /// Sets vote statistics in bulk (missed_votes / total_votes). Use after a batch of L1/L2 votes.
+    /// Recomputes reputation. `total_votes` must be >= `missed_votes`.
+    pub fn set_vote_stats(&self, node_id: &NodeId, missed_votes: u64, total_votes: u64) -> Result<()> {
+        if total_votes < missed_votes {
+            return Err(NodeRegistryError::Other(format!(
+                "total_votes ({}) must be >= missed_votes ({})",
+                total_votes, missed_votes
+            ))
+            .into());
+        }
+        let max_stake = self.max_stake();
+        let mut nodes = self.nodes.write().unwrap();
+        let node = nodes.get_mut(node_id).ok_or_else(|| NodeRegistryError::NodeNotFound(node_id.clone()))?;
+        node.missed_votes = missed_votes;
+        node.total_votes = total_votes;
+        node.compute_reputation(max_stake);
+        Ok(())
+    }
+
     /// Records one vote for a node. Set `missed` to true if the node did not participate.
     pub fn record_vote(&self, node_id: &NodeId, missed: bool) -> Result<()> {
         let max_stake = self.max_stake();
@@ -451,5 +508,47 @@ mod tests {
         let n2 = reg.get(&"n1".into()).unwrap();
         assert_eq!(n1.reputation_score, n2.reputation_score);
         assert_eq!(n1.selection_weight(), n2.selection_weight());
+    }
+
+    #[test]
+    fn test_set_scores_batch() {
+        let reg = NodeRegistry::new();
+        reg.register("n1".into(), "pk1".into(), 1000, 10).unwrap();
+        reg.set_scores(&"n1".into(), 800_000, 600_000, Some((3, 10))).unwrap();
+        let n = reg.get(&"n1".into()).unwrap();
+        assert_eq!(n.uptime_score, 800_000);
+        assert_eq!(n.latency_score, 600_000);
+        assert_eq!(n.current_tasks, 3);
+        assert_eq!(n.max_capacity, 10);
+        assert_eq!(n.load_score, (3 * SCORE_SCALE) / 10);
+    }
+
+    #[test]
+    fn test_set_scores_without_load() {
+        let reg = NodeRegistry::new();
+        reg.register("n1".into(), "pk1".into(), 1000, 10).unwrap();
+        reg.set_scores(&"n1".into(), 500_000, 500_000, None).unwrap();
+        let n = reg.get(&"n1".into()).unwrap();
+        assert_eq!(n.uptime_score, 500_000);
+        assert_eq!(n.latency_score, 500_000);
+    }
+
+    #[test]
+    fn test_set_vote_stats() {
+        let reg = NodeRegistry::new();
+        reg.register("n1".into(), "pk1".into(), 1000, 10).unwrap();
+        reg.set_vote_stats(&"n1".into(), 2, 10).unwrap();
+        let n = reg.get(&"n1".into()).unwrap();
+        assert_eq!(n.missed_votes, 2);
+        assert_eq!(n.total_votes, 10);
+        assert_eq!(n.vote_accuracy(), (8 * SCORE_SCALE) / 10);
+    }
+
+    #[test]
+    fn test_set_vote_stats_rejects_invalid() {
+        let reg = NodeRegistry::new();
+        reg.register("n1".into(), "pk1".into(), 1000, 10).unwrap();
+        let r = reg.set_vote_stats(&"n1".into(), 11, 10);
+        assert!(r.is_err());
     }
 }

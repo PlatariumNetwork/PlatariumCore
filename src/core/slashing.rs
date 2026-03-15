@@ -3,7 +3,7 @@
 //! Nodes are penalized for: failing to vote, voting against the majority, equivocation (signing two different blocks at the same height), or confirming an invalid transaction.
 //! Penalties: reputation is reduced by a reason-dependent amount; stake is reduced by a minor slash. If reputation falls below the threshold, the node is suspended.
 //!
-//! **Integration:** For “vote against majority” (L1/L2), call `apply_slash(registry, node_id, SlashingReason::AgainstMajority)` or `apply_slash_batch` on the list of nodes to penalize for full penalty (reputation, stake, and suspension check).
+//! **Step 6:** SlashingReason: NoVote, AgainstMajority, Equivocation, InvalidTx. apply_slash / apply_slash_batch; penalty_amounts(reason); SUSPENSION_THRESHOLD → status = Suspended. **Integration:** For “vote against majority” (L1/L2), call `apply_slash(registry, node_id, SlashingReason::AgainstMajority)` or `apply_slash_batch` on the list of nodes to penalize for full penalty (reputation, stake, and suspension check).
 //!
 //! # Determinism
 //! Same (node_id, reason) yields the same penalty amounts; all arithmetic is integer-only.

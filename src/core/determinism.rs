@@ -1,5 +1,12 @@
 //! Determinism audit and enforcement for Platarium Core execution paths.
 //!
+//! **Step 10 — Integration and Invariant Testing (Determinism Tests):**
+//! Property-based invariants are tested in `tests/determinism_invariants_test.rs`:
+//! - Same inputs → same validator selection (L1/L2).
+//! - Same seed → same committee.
+//! - Same state / same TX → same state_root.
+//! - **Full ban on float, RNG, and system time** in the consensus path; double-run equality asserts determinism.
+//!
 //! # Requirements
 //! - **No float arithmetic:** Integer only (u64, u128, etc.).
 //! - **No RNG** in execution paths (RNG is allowed only in key generation, outside execution).
@@ -7,7 +14,7 @@
 //! - **No unsorted iteration:** HashMap/Set iteration must be sorted (e.g. collect and sort by key) before use in hashing or ordering.
 //!
 //! # Audited paths
-//! Fee (fee.rs), transaction (transaction.rs), state (state.rs), mempool (mempool.rs), and execution (execution.rs) have been audited: integer-only, no RNG/time, and sorted iteration where applicable. Same inputs yield the same outputs.
+//! Fee (fee.rs), transaction (transaction.rs), state (state.rs), mempool (mempool.rs), execution (execution.rs), validator_selection, confirmation_layer, block_assembly, slashing, tx_assignment: integer-only, no RNG/time, sorted iteration where applicable. Same inputs yield the same outputs.
 //!
 //! # Forbidden in execution paths
 //! Float types and arithmetic; RNG; system time or timestamps; unsorted `HashMap`/`HashSet` iteration. Enforcement is via review, documentation, and tests.

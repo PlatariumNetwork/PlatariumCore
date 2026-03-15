@@ -1,7 +1,12 @@
-//! Level 1 Transaction Confirmation Layer (Module 3).
+//! Transaction Confirmation Layer — L1 (Module 3).
 //!
-//! The first validator layer: a subset of nodes (10–25%) verifies each transaction (balance, nonce, signature, fee in μPLP).
-//! If at least 67% vote Confirm, the transaction is confirmed; otherwise it is rejected. Nodes that vote against the majority are penalized.
+//! **Validation Modules Analysis — Step 3:** Integrates transaction verification by validator groups.
+//! - Select **10–30%** of validators per TX (via Step 2: `select_validators` / `selection_percent_from_load`).
+//! - Validators verify **balance**, **nonce**, **signature**, **fee** (μPLP); then vote Confirm/Reject.
+//! - **`process_l1_confirmation(votes)`** → returns **(Confirmed | Rejected, to_penalize)**.
+//!   Confirmed if ≥67% vote Confirm; nodes that voted against the majority are in `to_penalize`.
+//!
+//! Flow: `verify_tx_for_l1(state, tx)` (balance/nonce/sig/fee) → collect votes → `process_l1_confirmation(votes)` → `apply_l1_penalties(registry, to_penalize)`.
 //!
 //! # Determinism
 //! Same transaction, state, and votes yield the same `ConfirmationResult` and list of nodes to penalize. Verification reuses `ExecutionLogic` (signature, fee, balance, nonce).
@@ -45,7 +50,8 @@ impl From<ConfirmationError> for PlatariumError {
     }
 }
 
-/// Performs L1 verification: balance, nonce, signature, and fee (μPLP). Returns `Ok(true)` if the transaction is valid, `Ok(false)` otherwise (no error, only failed checks).
+/// Performs L1 verification (Step 3): balance, nonce, signature, and fee (μPLP).
+/// Returns `Ok(true)` if the transaction is valid for L1, `Ok(false)` otherwise (no error, only failed checks).
 pub fn verify_tx_for_l1(state: &State, tx: &Transaction) -> Result<bool> {
     let valid_sig_and_fee = ExecutionLogic::validate_transaction(tx).is_ok();
     if !valid_sig_and_fee {
@@ -55,8 +61,9 @@ pub fn verify_tx_for_l1(state: &State, tx: &Transaction) -> Result<bool> {
     Ok(applicable)
 }
 
-/// Aggregates L1 votes and returns the confirmation result plus the list of node ids to penalize (those that voted against the majority).
-/// Confirmed if (confirm_count × 100) ≥ (total_votes × L1_CONFIRM_THRESHOLD_PCT); otherwise Rejected. Majority is Confirm when confirm_count > total/2.
+/// Aggregates L1 votes and returns **(Confirmed | Rejected, to_penalize)** (Step 3).
+/// Confirmed if (confirm_count × 100) ≥ (total_votes × L1_CONFIRM_THRESHOLD_PCT); otherwise Rejected.
+/// `to_penalize` = node ids that voted against the majority (for `apply_l1_penalties`).
 pub fn process_l1_confirmation(
     votes: &[(NodeId, Vote)],
 ) -> Result<(ConfirmationResult, Vec<NodeId>)> {

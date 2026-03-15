@@ -10,6 +10,7 @@ use crate::error::Result;
 use crate::core::asset::Asset;
 use crate::signature::{hash_message, verify_signature};
 use thiserror::Error;
+use crate::PlatariumError;
 
 /// Minimum transaction fee in μPLP. Fee currency is fixed to μPLP and is not configurable.
 pub const MIN_FEE_UPLP: u128 = 1;
@@ -202,6 +203,54 @@ impl Transaction {
         }
         Ok(())
     }
+
+    /// Parse transaction from Gateway JSON. Asset may be string "PLP" or "Token:XXX".
+    /// Amount and fee_uplp may be number or string (u64/u128).
+    pub fn from_gateway_json(json_str: &str) -> std::result::Result<Self, PlatariumError> {
+        let v: serde_json::Value = serde_json::from_str(json_str)
+            .map_err(|e| PlatariumError::Signature(format!("invalid tx JSON: {}", e)))?;
+        let hash = v["hash"].as_str().ok_or_else(|| PlatariumError::Signature("missing hash".into()))?.to_string();
+        let from = v["from"].as_str().ok_or_else(|| PlatariumError::Signature("missing from".into()))?.to_string();
+        let to = v["to"].as_str().ok_or_else(|| PlatariumError::Signature("missing to".into()))?.to_string();
+        let asset_str = v["asset"].as_str().unwrap_or("PLP");
+        let asset = if asset_str == "PLP" {
+            Asset::PLP
+        } else if asset_str.starts_with("Token:") {
+            Asset::Token(asset_str["Token:".len()..].to_string())
+        } else {
+            Asset::Token(asset_str.to_string())
+        };
+        let amount = parse_u128_json(&v["amount"]).ok_or_else(|| PlatariumError::Signature("missing or invalid amount".into()))?;
+        let fee_uplp = parse_u128_json(&v["fee_uplp"]).ok_or_else(|| PlatariumError::Signature("missing or invalid fee_uplp".into()))?;
+        let nonce = v["nonce"].as_u64().ok_or_else(|| PlatariumError::Signature("missing or invalid nonce".into()))?;
+        let reads: HashSet<String> = v["reads"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+        let writes: HashSet<String> = v["writes"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+        let sig_main = v["sig_main"].as_str().ok_or_else(|| PlatariumError::Signature("missing sig_main".into()))?.to_string();
+        let sig_derived = v["sig_derived"].as_str().ok_or_else(|| PlatariumError::Signature("missing sig_derived".into()))?.to_string();
+        Ok(Self {
+            hash,
+            from,
+            to,
+            asset,
+            amount,
+            fee_uplp,
+            nonce,
+            reads,
+            writes,
+            sig_main,
+            sig_derived,
+        })
+    }
+}
+
+fn parse_u128_json(v: &serde_json::Value) -> Option<u128> {
+    if let Some(n) = v.as_u64() {
+        return Some(n as u128);
+    }
+    if let Some(s) = v.as_str() {
+        return s.parse::<u128>().ok();
+    }
+    None
 }
 
 #[cfg(test)]

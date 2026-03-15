@@ -1,8 +1,9 @@
 //! Mempool (transaction pool): pending transaction storage and ordering before execution.
 //!
-//! # Forced inclusion (anti-censorship)
-//! Transaction hashes can be enqueued for forced inclusion so they are prioritized when
-//! building the next block. Use `add_forced_inclusion` and `get_transaction_hashes_for_block(max_count)` in block assembly.
+//! **Validation Modules Analysis — Step 5: Forced-inclusion Mempool (Anti-Censorship)**
+//! - **Forced-inclusion queue** (up to 256 TX hashes): `add_forced_inclusion(tx_hash)`, `get_forced_inclusion()`.
+//! - **`get_transaction_hashes_for_block(max_count)`** returns forced-inclusion hashes first (that are still in the mempool), then regular pending TX up to `max_count`. Guarantees that forced TX are included when building the block.
+//! - Constant: `MAX_FORCED_INCLUSION_QUEUE` = 256.
 //!
 //! # Fairness and determinism
 //!
@@ -57,7 +58,8 @@ impl From<MempoolError> for PlatariumError {
 }
 
 /// Maximum number of transaction hashes in the forced-inclusion queue.
-const FORCED_INCLUSION_CAP: usize = 256;
+/// Maximum forced-inclusion queue size (Step 5).
+pub const MAX_FORCED_INCLUSION_QUEUE: usize = 256;
 
 /// Thread-safe transaction pool (mempool) for pending transactions before execution.
 #[derive(Debug)]
@@ -158,7 +160,7 @@ impl Mempool {
     /// Adds a transaction hash to the forced-inclusion queue (anti-censorship). No effect if the queue is at capacity or the hash is already enqueued.
     pub fn add_forced_inclusion(&self, tx_hash: String) {
         let mut q = self.forced_inclusion.write().unwrap();
-        if q.len() < FORCED_INCLUSION_CAP && !q.contains(&tx_hash) {
+        if q.len() < MAX_FORCED_INCLUSION_QUEUE && !q.contains(&tx_hash) {
             q.push(tx_hash);
         }
     }

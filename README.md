@@ -521,19 +521,24 @@ PlatariumCore/
 └── Cargo.toml
 ```
 
-### Consensus and validation (Modules 1–5)
+### Consensus and validation (Modules 1–7)
 
 The core includes deterministic, integer-only consensus building blocks (no RNG or system time):
 
 | Module | File | Purpose |
 |--------|------|---------|
-| **1. Node Registry & Rating** | `node_registry.rs` | Validator registry with reputation, load, uptime; scoring and eligibility. |
-| **2. Dynamic Validator Selection** | `validator_selection.rs` | Adaptive L1 (10–25%) and L2 (10–20%) selection by load; weighted selection with seed from block number and global entropy. |
-| **3. L1 Transaction Confirmation** | `confirmation_layer.rs` | L1 verification (balance, nonce, signature, fee); ≥67% confirm; vote aggregation and penalties. |
-| **4. Block Assembly & L2** | `block_assembly.rs` | Block structure (Merkle root, state root, block hash); dynamic limits; L2 block votes (≥70% confirm). |
-| **5. Slashing & Stability** | `slashing.rs` | Penalties for no vote, against majority, equivocation, invalid tx; reputation/stake slashing; suspension. |
+| **1. Node Registry & Reputation Engine** | `node_registry.rs` | **Validation Modules Step 1.** Stores `node_id`, `public_key`, `stake`, `reputation_score`, `uptime_score`, `latency_score`, `load_score`, `missed_votes`/`total_votes`. API: `register`, `unregister`, `set_scores` (batch), `set_uptime_score`, `set_latency_score`, `set_load`, `set_vote_stats`, `get_eligible`. |
+| **2. Dynamic Validator Selection** | `validator_selection.rs` | **Step 2.** `compute_seed(block_number, prev_finalized_hash)`, `selection_percent_from_load(current_tps, capacity)` (10–30% L1, 10–20% L2), `select_validators(registry, seed, percent)` / `select_validators_with_percent`, `select_l1_l2_validators` → (L1 list, L2 list). |
+| **3. L1 Transaction Confirmation** | `confirmation_layer.rs` | **Step 3.** Select 10–30% validators per TX; verify balance/nonce/sig/fee; `process_l1_confirmation(votes)` → (Confirmed/Rejected, to_penalize); `apply_l1_penalties`. |
+| **4. Block Assembly & L2** | `block_assembly.rs` | **Step 4.** Form block from TX list (`assemble_block`); select L2 validators; L2 vote ≥70% (`process_l2_block_votes`); finalize or reject (`block_finalized(result)`). |
+| **5. Forced-inclusion Mempool** | `mempool.rs` | **Step 5.** Forced-inclusion queue (up to 256): `add_forced_inclusion`, `get_forced_inclusion`, `get_transaction_hashes_for_block(max_count)` → forced first, then regular. `MAX_FORCED_INCLUSION_QUEUE`. |
+| **6. Slashing & Stability** | `slashing.rs` | **Step 6.** SlashingReason (NoVote, AgainstMajority, Equivocation, InvalidTx); `apply_slash`, `apply_slash_batch`, `penalty_amounts(reason)`; SUSPENSION_THRESHOLD → status = Suspended. |
+| **7. Dynamic Group-Based TX Assignment** | `tx_assignment.rs` | **Step 7.** Required total stake per TX; form verifier groups (stake ≥ required, each validator stake ≥ TX amount); load/reputation ordering; `assign_transactions_to_groups`; after verification apply slashing/penalty on errors. |
+| **8. Block Leader Rotation & BFT Finality** | `block_assembly.rs` | **Step 8.** `block_leader_for_height(block_number, l2_validators)` — deterministic leader; leader proposes block; L2 HotStuff-style voting; block **final** after ≥70% votes (safety and deterministic finalization). |
+| **9. Deterministic Randomness for Validator Selection** | `validator_selection.rs` | **Step 9.** `global_entropy = hash(prev_finalized_block)`; `seed = SHA256(block_number \|\| global_entropy)` (`compute_seed` / `committee_selection_seed`); deterministic L1/L2 selection so every node can verify committees. |
+| **10. Integration & Invariant Testing (Determinism)** | `tests/determinism_invariants_test.rs`, `core/determinism.rs` | **Step 10.** Property-style tests: same inputs → same validator selection; same seed → same committee; same TX/state → same state_root; no float/RNG/system time in consensus path. |
 
-Flow: **TX → Mempool → L1 validators → Confirmed TX pool → Block assembler → L2 validators → Block finalized.** See `docs/MODULES_ANALYSIS.md` for details.
+Flow: **TX → Mempool → (assign TX to groups) → L1 validators → Confirmed TX pool → Block assembler → L2 validators → Block finalized.**
 
 ## 🔐 Modules
 
@@ -564,6 +569,44 @@ Flow: **TX → Mempool → L1 validators → Confirmed TX pool → Block assembl
 - `derive_signature_seed_from_master_seed()` - Derive key via HKDF
 - `verify_correlation()` - Verify correlation between keys
 - `bn_to_hex32()` - Convert to 64-character hex
+
+### Dynamic Group-Based TX Assignment (Validation Modules — Step 7)
+
+- `required_stake_for_tx(tx)` / `required_stake_for_amount(amount)` — required total stake for a group to safely verify the TX.
+- `min_validator_stake_for_tx(tx)` / `min_validator_stake_for_amount(amount)` — minimum stake per validator (each must have stake ≥ TX amount).
+- `form_verifier_groups(registry, required_total_stake, min_validator_stake, max_groups)` — forms groups with load/reputation ordering; each group total stake ≥ required.
+- `assign_transactions_to_groups(txs, registry, max_groups)` — assigns each TX to a verifier group; returns `Vec<TxGroupAssignment>` (tx_hash, group_index, verifier_ids).
+- After verification use `process_l1_confirmation` → `apply_l1_penalties` or `apply_slash_batch` for errors.
+- `DEFAULT_MIN_REQUIRED_STAKE`, `DEFAULT_MIN_VALIDATOR_STAKE`, `TxAssignmentError`, `TxGroupAssignment`.
+
+### Block Leader Rotation & BFT-style Finality (Validation Modules — Step 8)
+
+- **Leader rotation:** `block_leader_for_height(block_number, l2_validators)` — deterministic leader for height (round-robin over L2 set). `block_leader_index_for_height(block_number, num_validators)` — leader index.
+- **Flow:** Leader proposes block (`assemble_block` with `producer_id` = leader) → L2 validators vote (HotStuff-style) → `process_l2_block_votes(votes)` → block **final** when ≥70% Confirm (`L2_CONFIRM_THRESHOLD_PCT`); use `block_finalized(result)`.
+- Ensures **safety and deterministic finalization** (BFT-style finality).
+
+### Deterministic Randomness for Validator Selection (Validation Modules — Step 9)
+
+- **Reproducible committee selection:** `global_entropy = hash(prev_finalized_block)` (use previous finalized block hash as bytes). **seed = SHA256(block_number || global_entropy)** — `compute_seed(block_number, global_entropy)` or `committee_selection_seed(block_number, global_entropy)`.
+- **Deterministic selection** for L1 and L2: same inputs yield the same committees; **every node can verify** that the L1/L2 committees were selected correctly.
+
+### Integration & Invariant Testing — Determinism (Validation Modules — Step 10)
+
+- **Run:** `cargo test --test determinism_invariants`
+- **Invariants (property-style):** Same inputs → same validator selection (L1/L2); same seed → same committee; same state / same TX → same state_root; consensus path double-run yields identical results (no float, RNG, or system time).
+- **Determinism module:** `core/determinism.rs` — audit and documentation; unit tests for fee, transaction hash, state snapshot, mempool order.
+
+### Node Registry & Reputation Engine (Validation Modules — Step 1)
+
+- `NodeRegistry` - Thread-safe registry: **register**, **unregister**, **set scores**, **get_eligible**
+  - Stored per node: `node_id`, `public_key`, `stake`, `reputation_score`, `uptime_score`, `latency_score`, `load_score`, `missed_votes`, `total_votes`
+  - `register(node_id, public_key, stake, max_capacity)` - Add node
+  - `unregister(node_id)` - Remove node
+  - `set_scores(node_id, uptime_score, latency_score, load_option)` - Batch set scores (load = `Some((current_tasks, max_capacity))`)
+  - `set_uptime_score`, `set_latency_score`, `set_load`, `set_stake`, `set_status` - Individual updates
+  - `set_vote_stats(node_id, missed_votes, total_votes)` - Bulk vote stats
+  - `get_eligible()` - All active nodes, sorted by `node_id` (for validator selection)
+- `Node`, `NodeId`, `NodeStatus`, `NodeRegistryError`, `SCORE_SCALE`, `WEIGHT_*` - Types and constants
 
 ### Transaction Core
 
