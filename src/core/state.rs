@@ -962,7 +962,7 @@ mod tests {
     
     #[test]
     fn test_snapshot_identity_two_snapshots_in_row() {
-        // Test: два snapshot підряд → однакові
+        // Test: two consecutive snapshots are identical
         let state = State::new();
         let addr1 = "addr1".to_string();
         let addr2 = "addr2".to_string();
@@ -1115,7 +1115,7 @@ mod tests {
     
     #[test]
     fn test_restore_does_not_modify_snapshot() {
-        // Test: restore не змінює snapshot
+        // Test: restore does not change snapshot
         let state = State::new();
         let addr = "addr".to_string();
         

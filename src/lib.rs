@@ -10,7 +10,7 @@ pub use mnemonic::{generate_mnemonic, validate_mnemonic, CHARACTER_SET};
 pub use key_generator::{KeyGenerator, KeyPair, DerivationPaths, generate_alphanumeric_part};
 pub use utils::{derive_signature_seed_from_master_seed, bn_to_hex32};
 pub use signer::{sign_with_both_keys, DualSignature, SignatureWithType};
-pub use signature::{verify_signature, hash_message, sign_message, SignatureComponents};
+pub use signature::{verify_signature, hash_message, sign_message, normalize_signature_hex, SignatureComponents};
 pub use utils::verify_correlation;
 pub use error::{PlatariumError, Result};
 
@@ -126,4 +126,22 @@ pub use core::tx_assignment::{
     TxAssignmentError,
     DEFAULT_MIN_REQUIRED_STAKE,
     DEFAULT_MIN_VALIDATOR_STAKE,
+};
+pub use core::state_file::{
+    STATE_FILE_VERSION,
+    StateFileData,
+    init_state_file,
+    load_state_file,
+    save_state_file,
+    state_apply_tx_json,
+    state_credit_json,
+    state_query_json,
+    state_root_json,
+    state_validate_tx_json,
+};
+pub use core::consensus_cli::{
+    assemble_block_json,
+    l1_process_votes_json,
+    l1_verify_txs_json,
+    l2_process_votes_json,
 };

@@ -55,3 +55,11 @@ path = "tests/integration_test.rs"
 [[test]]
 name = "determinism_invariants"
 path = "tests/determinism_invariants_test.rs"
+
+[[test]]
+name = "state_cli"
+path = "tests/state_cli_test.rs"
+
+[[test]]
+name = "consensus_cli"
+path = "tests/consensus_cli_test.rs"

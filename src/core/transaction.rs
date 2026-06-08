@@ -69,6 +69,14 @@ pub struct Transaction {
 
     /// Derived signature (from HKDF-derived key)
     pub sig_derived: String,
+
+    /// Main public key hex (defaults to `from` when absent)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pub_main: Option<String>,
+
+    /// HKDF-derived public key hex (required for dual-signature verification when present)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pub_derived: Option<String>,
 }
 
 impl Transaction {
@@ -97,6 +105,8 @@ impl Transaction {
             writes,
             sig_main,
             sig_derived,
+            pub_main: None,
+            pub_derived: None,
         };
         tx.hash = tx.compute_hash()?;
         Ok(tx)
@@ -162,11 +172,16 @@ impl Transaction {
             reads: reads_vec,
             writes: writes_vec,
         };
-        let main_verified = verify_signature(&message, &self.sig_main, &self.from)?;
+        let pub_main = self.pub_main.as_deref().unwrap_or(self.from.as_str());
+        let pub_derived = self
+            .pub_derived
+            .as_deref()
+            .unwrap_or(pub_main);
+        let main_verified = verify_signature(&message, &self.sig_main, pub_main)?;
         if !main_verified {
             return Ok(false);
         }
-        let derived_verified = verify_signature(&message, &self.sig_derived, &self.from)?;
+        let derived_verified = verify_signature(&message, &self.sig_derived, pub_derived)?;
         Ok(main_verified && derived_verified)
     }
     
@@ -227,6 +242,14 @@ impl Transaction {
         let writes: HashSet<String> = v["writes"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
         let sig_main = v["sig_main"].as_str().ok_or_else(|| PlatariumError::Signature("missing sig_main".into()))?.to_string();
         let sig_derived = v["sig_derived"].as_str().ok_or_else(|| PlatariumError::Signature("missing sig_derived".into()))?.to_string();
+        let pub_main = v
+            .get("pub_main")
+            .and_then(|x| x.as_str())
+            .map(String::from);
+        let pub_derived = v
+            .get("pub_derived")
+            .and_then(|x| x.as_str())
+            .map(String::from);
         Ok(Self {
             hash,
             from,
@@ -239,6 +262,8 @@ impl Transaction {
             writes,
             sig_main,
             sig_derived,
+            pub_main,
+            pub_derived,
         })
     }
 }

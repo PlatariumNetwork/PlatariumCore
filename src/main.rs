@@ -92,11 +92,112 @@ enum Commands {
         pubkey: String,
     },
 
-    /// Validate a transaction (basic: amount, fee, signatures). Input: JSON tx (Gateway format). Output: JSON {"valid": true} or {"valid": false, "error": "..."}
+    /// Validate a transaction (basic or full state check with --state-file). Output: JSON {"valid": true} or {"valid": false, "error": "..."}
     ValidateTx {
         /// Transaction JSON (hash, from, to, asset, amount, fee_uplp, nonce, reads, writes, sig_main, sig_derived)
         #[arg(long)]
         tx: String,
+        /// Optional state file for nonce/balance applicability check
+        #[arg(long)]
+        state_file: Option<String>,
+    },
+
+    /// Initialize empty persistent Core state file
+    StateInit {
+        #[arg(long)]
+        state_file: String,
+    },
+
+    /// Query balance, μPLP, and nonce from state file
+    StateQuery {
+        #[arg(long)]
+        state_file: String,
+        #[arg(long)]
+        address: String,
+        #[arg(long, default_value = "PLP")]
+        asset: String,
+    },
+
+    /// Dry-run validate transaction against state file (no apply)
+    StateValidateTx {
+        #[arg(long)]
+        state_file: String,
+        #[arg(long)]
+        tx: String,
+    },
+
+    /// Apply transaction to state file (production commit)
+    StateApplyTx {
+        #[arg(long)]
+        state_file: String,
+        #[arg(long)]
+        tx: String,
+    },
+
+    /// Credit PLP and μPLP to address (testnet only)
+    StateCredit {
+        #[arg(long)]
+        state_file: String,
+        #[arg(long)]
+        address: String,
+        #[arg(long, default_value = "0")]
+        plp: u128,
+        #[arg(long, default_value = "0")]
+        uplp: u128,
+        /// Required flag: only allowed on testnet flows
+        #[arg(long)]
+        testnet: bool,
+    },
+
+    /// Compute deterministic state root from state file
+    StateRoot {
+        #[arg(long)]
+        state_file: String,
+    },
+
+    /// L1: verify all transactions against state (balance, nonce, signature, fee)
+    L1VerifyTxs {
+        #[arg(long)]
+        state_file: String,
+        /// JSON array of transaction JSON strings
+        #[arg(long)]
+        txs: String,
+    },
+
+    /// L1: aggregate validator votes (JSON array of {node_id, yes})
+    L1ProcessVotes {
+        #[arg(long)]
+        votes: String,
+    },
+
+    /// L2: aggregate block votes (JSON array of {node_id, yes})
+    L2ProcessVotes {
+        #[arg(long)]
+        votes: String,
+    },
+
+    /// Assemble Core block header (merkle_root, state_root, block_hash)
+    AssembleBlock {
+        #[arg(long)]
+        state_file: String,
+        #[arg(long)]
+        block_number: u64,
+        #[arg(long)]
+        previous_hash: String,
+        #[arg(long)]
+        timestamp: i64,
+        /// JSON array of transaction hash strings
+        #[arg(long)]
+        tx_hashes: String,
+        #[arg(long)]
+        producer_id: String,
+    },
+
+    /// Start JSON-RPC server for Gateway native binding. TCP host:port or unix:/path
+    Serve {
+        /// Listen address, e.g. 127.0.0.1:19500 or unix:/tmp/platarium-core.sock
+        #[arg(long)]
+        listen: String,
     },
 
     /// Sign a transaction with both keys; outputs full signed tx JSON (Gateway adds to mempool).
@@ -155,7 +256,34 @@ fn main() {
             signature,
             pubkey,
         } => handle_verify_signature(message, signature, pubkey),
-        Commands::ValidateTx { tx } => handle_validate_tx(tx),
+        Commands::ValidateTx { tx, state_file } => handle_validate_tx(tx, state_file),
+        Commands::StateInit { state_file } => handle_state_init(state_file),
+        Commands::StateQuery {
+            state_file,
+            address,
+            asset,
+        } => handle_state_query(state_file, address, asset),
+        Commands::StateValidateTx { state_file, tx } => handle_state_validate_tx(state_file, tx),
+        Commands::StateApplyTx { state_file, tx } => handle_state_apply_tx(state_file, tx),
+        Commands::StateCredit {
+            state_file,
+            address,
+            plp,
+            uplp,
+            testnet,
+        } => handle_state_credit(state_file, address, plp, uplp, testnet),
+        Commands::StateRoot { state_file } => handle_state_root(state_file),
+        Commands::L1VerifyTxs { state_file, txs } => handle_l1_verify_txs(state_file, txs),
+        Commands::L1ProcessVotes { votes } => handle_l1_process_votes(votes),
+        Commands::L2ProcessVotes { votes } => handle_l2_process_votes(votes),
+        Commands::AssembleBlock {
+            state_file,
+            block_number,
+            previous_hash,
+            timestamp,
+            tx_hashes,
+            producer_id,
+        } => handle_assemble_block(state_file, block_number, previous_hash, timestamp, tx_hashes, producer_id),
         Commands::SignTransaction {
             from,
             to,
@@ -168,12 +296,18 @@ fn main() {
             mnemonic,
             alphanumeric,
         } => handle_sign_transaction(from, to, asset, amount, fee_uplp, nonce, reads, writes, mnemonic, alphanumeric),
+        Commands::Serve { listen } => handle_serve(listen),
     };
 
     if let Err(e) = result {
         eprintln!("Error: {}", e);
         process::exit(1);
     }
+}
+
+fn handle_serve(listen: String) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    platarium_core::core::core_rpc::run_serve(&listen)?;
+    Ok(())
 }
 
 fn handle_selection_percent_from_load(load_pct: u64) -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -317,12 +451,115 @@ fn handle_verify_signature(
     Ok(())
 }
 
-fn handle_validate_tx(tx_json: String) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let out = match Transaction::from_gateway_json(&tx_json).and_then(|tx| tx.validate_basic().map_err(Into::into)) {
-        Ok(()) => serde_json::json!({ "valid": true }),
-        Err(e) => serde_json::json!({ "valid": false, "error": e.to_string() }),
+fn handle_validate_tx(
+    tx_json: String,
+    state_file: Option<String>,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let out = if let Some(path) = state_file {
+        state_validate_tx_json(std::path::Path::new(&path), &tx_json)?
+    } else {
+        match Transaction::from_gateway_json(&tx_json)
+            .and_then(|tx| tx.validate_basic().map_err(Into::into))
+        {
+            Ok(()) => serde_json::json!({ "valid": true }).to_string(),
+            Err(e) => serde_json::json!({ "valid": false, "error": e.to_string() }).to_string(),
+        }
     };
-    println!("{}", serde_json::to_string(&out)?);
+    println!("{}", out);
+    Ok(())
+}
+
+fn handle_state_init(state_file: String) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let path = std::path::Path::new(&state_file);
+    init_state_file(path)?;
+    println!(
+        r#"{{"ok":true,"path":{}}}"#,
+        serde_json::to_string(&state_file)?
+    );
+    Ok(())
+}
+
+fn handle_state_query(
+    state_file: String,
+    address: String,
+    asset: String,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let out = state_query_json(std::path::Path::new(&state_file), &address, &asset)?;
+    println!("{}", out);
+    Ok(())
+}
+
+fn handle_state_validate_tx(
+    state_file: String,
+    tx: String,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let out = state_validate_tx_json(std::path::Path::new(&state_file), &tx)?;
+    println!("{}", out);
+    Ok(())
+}
+
+fn handle_state_apply_tx(
+    state_file: String,
+    tx: String,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let out = state_apply_tx_json(std::path::Path::new(&state_file), &tx)?;
+    println!("{}", out);
+    Ok(())
+}
+
+fn handle_state_credit(
+    state_file: String,
+    address: String,
+    plp: u128,
+    uplp: u128,
+    testnet: bool,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let out = state_credit_json(std::path::Path::new(&state_file), &address, plp, uplp, testnet)?;
+    println!("{}", out);
+    Ok(())
+}
+
+fn handle_state_root(state_file: String) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let out = state_root_json(std::path::Path::new(&state_file))?;
+    println!("{}", out);
+    Ok(())
+}
+
+fn handle_l1_verify_txs(state_file: String, txs: String) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let out = l1_verify_txs_json(std::path::Path::new(&state_file), &txs)?;
+    println!("{}", out);
+    Ok(())
+}
+
+fn handle_l1_process_votes(votes: String) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let out = l1_process_votes_json(&votes)?;
+    println!("{}", out);
+    Ok(())
+}
+
+fn handle_l2_process_votes(votes: String) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let out = l2_process_votes_json(&votes)?;
+    println!("{}", out);
+    Ok(())
+}
+
+fn handle_assemble_block(
+    state_file: String,
+    block_number: u64,
+    previous_hash: String,
+    timestamp: i64,
+    tx_hashes: String,
+    producer_id: String,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let out = assemble_block_json(
+        std::path::Path::new(&state_file),
+        block_number,
+        &previous_hash,
+        timestamp,
+        &tx_hashes,
+        &producer_id,
+    )?;
+    println!("{}", out);
     Ok(())
 }
 
@@ -339,7 +576,6 @@ fn handle_sign_transaction(
     alphanumeric: String,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     use std::collections::HashSet;
-
     if !validate_mnemonic(&mnemonic) {
         return Err("Invalid mnemonic phrase".into());
     }
@@ -383,8 +619,10 @@ fn handle_sign_transaction(
         writes: writes_sorted,
     };
     let sig_result = sign_with_both_keys(&message, &mnemonic, &alphanumeric)?;
-    let sig_main = sig_result.signatures[0].signature_compact.clone();
-    let sig_derived = sig_result.signatures[1].signature_compact.clone();
+    let sig_main = normalize_signature_hex(&sig_result.signatures[0].signature_compact);
+    let sig_derived = normalize_signature_hex(&sig_result.signatures[1].signature_compact);
+    let pub_main = sig_result.signatures[0].pub_key.clone();
+    let pub_derived = sig_result.signatures[1].pub_key.clone();
     // Output Gateway-compatible JSON (asset as string "PLP" or "Token:X")
     let reads_out: Vec<String> = reads_set.iter().cloned().collect();
     let writes_out: Vec<String> = writes_set.iter().cloned().collect();
@@ -400,6 +638,8 @@ fn handle_sign_transaction(
         "writes": writes_out,
         "sig_main": sig_main,
         "sig_derived": sig_derived,
+        "pub_main": pub_main,
+        "pub_derived": pub_derived,
     });
     println!("{}", serde_json::to_string(&out)?);
     Ok(())

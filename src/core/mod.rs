@@ -21,6 +21,9 @@ pub mod confirmation_layer;
 pub mod block_assembly;
 pub mod slashing;
 pub mod tx_assignment;
+pub mod state_file;
+pub mod consensus_cli;
+pub mod core_rpc;
 
 use crate::error::{PlatariumError, Result};
 use crate::core::transaction::Transaction;

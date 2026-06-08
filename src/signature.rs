@@ -6,6 +6,19 @@ use crate::error::{PlatariumError, Result};
 
 const DOMAIN_SEPARATOR: &str = "PlatariumSignature:";
 
+/// Normalizes CLI compact signatures (128 hex + optional recovery suffix) to 64-byte compact hex.
+pub fn normalize_signature_hex(signature_hex: &str) -> String {
+    let hex: String = signature_hex
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .collect();
+    if hex.len() >= 128 {
+        hex[..128].to_string()
+    } else {
+        hex
+    }
+}
+
 /// Hashes a message with domain separator
 pub fn hash_message<T: serde::Serialize>(message: &T) -> Result<[u8; 32]> {
     let json = serde_json::to_string(message)
@@ -66,8 +79,8 @@ pub fn verify_signature(
     let msg = Message::from_digest_slice(&hash)
         .map_err(|e| PlatariumError::Signature(format!("Invalid message hash: {}", e)))?;
     
-    // Parse signature
-    let sig_bytes = hex::decode(signature_hex)
+    // Parse signature (compact may include trailing recovery byte from CLI)
+    let sig_bytes = hex::decode(normalize_signature_hex(signature_hex))
         .map_err(|e| PlatariumError::Signature(format!("Invalid signature hex: {}", e)))?;
     
     let signature = if sig_bytes.len() == 64 {

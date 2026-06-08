@@ -424,7 +424,7 @@ mod tests {
     
     #[test]
     fn test_simulation_does_not_modify_state() {
-        // Test: simulation не змінює state
+        // Test: simulation does not mutate state
         let state = State::new();
         let sender = "sender".to_string();
         let receiver = "receiver".to_string();
