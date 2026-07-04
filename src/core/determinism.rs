@@ -1,6 +1,6 @@
 //! Determinism audit and enforcement for Platarium Core execution paths.
 //!
-//! **Step 10 — Integration and Invariant Testing (Determinism Tests):**
+//! **Step 10 - Integration and Invariant Testing (Determinism Tests):**
 //! Property-based invariants are tested in `tests/determinism_invariants_test.rs`:
 //! - Same inputs → same validator selection (L1/L2).
 //! - Same seed → same committee.

@@ -5,6 +5,7 @@
 use std::sync::Arc;
 use crate::error::{PlatariumError, Result};
 use crate::core::transaction::Transaction;
+use crate::core::asset::Asset;
 use crate::core::state::{State, StateSnapshot};
 use thiserror::Error;
 
@@ -111,11 +112,23 @@ impl ExecutionLogic {
             )));
         }
         let uplp_bal = state.get_uplp_balance(&tx.from);
-        if uplp_bal < tx.fee_uplp {
+        let fee_available = state.fee_spendable_uplp(&tx.from);
+        if fee_available < tx.fee_uplp {
             return Err(PlatariumError::State(format!(
                 "Insufficient μPLP for fee: required {}, available {}",
-                tx.fee_uplp, uplp_bal
+                tx.fee_uplp, fee_available
             )));
+        }
+        if tx.asset == Asset::PLP {
+            let fee_from_plp = tx.fee_uplp.saturating_sub(uplp_bal);
+            let plp_bal = state.get_asset_balance(&tx.from, &Asset::PLP);
+            if plp_bal < tx.amount.saturating_add(fee_from_plp) {
+                return Err(PlatariumError::State(format!(
+                    "Insufficient asset balance: required {}, available {}",
+                    tx.amount.saturating_add(fee_from_plp),
+                    plp_bal
+                )));
+            }
         }
         Ok(())
     }

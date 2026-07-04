@@ -1,12 +1,12 @@
 //! Block Assembly Logic & L2 Block Validator Voting (Module 4).
 //!
-//! **Validation Modules Analysis — Step 4:** Module that:
+//! **Validation Modules Analysis - Step 4:** Module that:
 //! - **Forms a block** from a list of TX hashes: `assemble_block(block_number, previous_hash, timestamp, transaction_hashes, state_snapshot, producer_id, producer_sig)`.
 //! - **L2 validators** are a separate group (from Step 2: `select_validators_l2` / `select_l1_l2_validators`).
 //! - **L2 block voting** ≥70%: `process_l2_block_votes(votes)` → `(BlockConfirmationResult, to_penalize)`.
 //! - **Finalize or reject block:** result is `BlockConfirmationResult::Confirmed` (finalize) or `Rejected` (reject); use `block_finalized(result)` to check.
 //!
-//! **Step 8 — Block Leader Rotation & BFT-style Finality:**
+//! **Step 8 - Block Leader Rotation & BFT-style Finality:**
 //! - **Leader rotation:** `block_leader_for_height(block_number, l2_validators)` returns the deterministic leader for that height (round-robin over the L2 set). The **leader proposes the block** (`producer_id` in `Block`).
 //! - **L2 group** conducts **HotStuff-style voting:** validators vote Confirm/Reject on the proposed block; votes are aggregated with `process_l2_block_votes`.
 //! - **Block is final** after **≥70%** Confirm votes (`L2_CONFIRM_THRESHOLD_PCT`). This provides **safety and deterministic finalization** (BFT-style finality).

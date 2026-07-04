@@ -1,15 +1,15 @@
 //! Dynamic Validator Selection Engine (Module 2).
 //!
-//! **Validation Modules Analysis — Step 2:** Uses reputation and load to determine the validator list.
+//! **Validation Modules Analysis - Step 2:** Uses reputation and load to determine the validator list.
 //! API:
-//! - `compute_seed(block_number, prev_finalized_hash)` — seed from block number and previous finalized block hash (pass hash as bytes).
-//! - `selection_percent_from_load(current_tps, capacity)` — returns selection percent (10–50% for L1 when load 0, else 10–30%; 10–20% for L2).
-//! - `select_validators(registry, seed, percent)` — returns list of L1 validators; use `select_validators_l2` for L2 (excluding L1).
-//! - `select_l1_l2_validators(...)` — convenience: returns (L1 list, L2 list) in one call.
+//! - `compute_seed(block_number, prev_finalized_hash)` - seed from block number and previous finalized block hash (pass hash as bytes).
+//! - `selection_percent_from_load(current_tps, capacity)` - returns selection percent (10–50% for L1 when load 0, else 10–30%; 10–20% for L2).
+//! - `select_validators(registry, seed, percent)` - returns list of L1 validators; use `select_validators_l2` for L2 (excluding L1).
+//! - `select_l1_l2_validators(...)` - convenience: returns (L1 list, L2 list) in one call.
 //!
-//! **Step 9 — Deterministic Randomness for Validator Selection:**
-//! - **global_entropy = hash(prev_finalized_block)** — use the previous finalized block hash (e.g. block hash bytes) as global entropy.
-//! - **seed = SHA256(block_number || global_entropy)** — canonical seed for committee selection (see `compute_seed` / `committee_selection_seed`).
+//! **Step 9 - Deterministic Randomness for Validator Selection:**
+//! - **global_entropy = hash(prev_finalized_block)** - use the previous finalized block hash (e.g. block hash bytes) as global entropy.
+//! - **seed = SHA256(block_number || global_entropy)** - canonical seed for committee selection (see `compute_seed` / `committee_selection_seed`).
 //! - **Deterministic selection** for L1 and L2: same (block_number, prev_finalized_block_hash, registry, load) yields the same committees.
 //! Every node can **reproduce the same seed and verify** that the L1/L2 committees were selected correctly.
 //!
@@ -134,7 +134,7 @@ pub fn compute_seed(block_number: u64, global_entropy: &[u8]) -> [u8; 32] {
     out
 }
 
-/// **Step 9 — Deterministic committee selection seed.** Same as `compute_seed`: **seed = SHA256(block_number || global_entropy)** with **global_entropy = hash(prev_finalized_block)**. Use this seed for `select_validators_with_percent` (L1) and L2 selection so that every node can verify committees.
+/// **Step 9 - Deterministic committee selection seed.** Same as `compute_seed`: **seed = SHA256(block_number || global_entropy)** with **global_entropy = hash(prev_finalized_block)**. Use this seed for `select_validators_with_percent` (L1) and L2 selection so that every node can verify committees.
 #[inline]
 pub fn committee_selection_seed(block_number: u64, global_entropy: &[u8]) -> [u8; 32] {
     compute_seed(block_number, global_entropy)

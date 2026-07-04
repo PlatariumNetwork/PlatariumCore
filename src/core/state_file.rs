@@ -195,11 +195,13 @@ pub fn state_query_json(path: &Path, address: &str, asset: &str) -> Result<Strin
     };
     let uplp = state.get_uplp_balance(&address.to_string());
     let nonce = state.get_nonce(&address.to_string());
+    let fee_spendable = state.fee_spendable_uplp(&address.to_string());
     let out = serde_json::json!({
         "address": address,
         "asset": asset_enum.as_canonical(),
         "balance": balance.to_string(),
         "uplp_balance": uplp.to_string(),
+        "fee_spendable_uplp": fee_spendable.to_string(),
         "nonce": nonce,
     });
     Ok(serde_json::to_string(&out).map_err(|e| PlatariumError::State(e.to_string()))?)

@@ -1,6 +1,6 @@
-//! Transaction Confirmation Layer — L1 (Module 3).
+//! Transaction Confirmation Layer - L1 (Module 3).
 //!
-//! **Validation Modules Analysis — Step 3:** Integrates transaction verification by validator groups.
+//! **Validation Modules Analysis - Step 3:** Integrates transaction verification by validator groups.
 //! - Select **10–30%** of validators per TX (via Step 2: `select_validators` / `selection_percent_from_load`).
 //! - Validators verify **balance**, **nonce**, **signature**, **fee** (μPLP); then vote Confirm/Reject.
 //! - **`process_l1_confirmation(votes)`** → returns **(Confirmed | Rejected, to_penalize)**.

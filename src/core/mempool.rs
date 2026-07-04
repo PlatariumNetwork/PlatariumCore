@@ -1,6 +1,6 @@
 //! Mempool (transaction pool): pending transaction storage and ordering before execution.
 //!
-//! **Validation Modules Analysis — Step 5: Forced-inclusion Mempool (Anti-Censorship)**
+//! **Validation Modules Analysis - Step 5: Forced-inclusion Mempool (Anti-Censorship)**
 //! - **Forced-inclusion queue** (up to 256 TX hashes): `add_forced_inclusion(tx_hash)`, `get_forced_inclusion()`.
 //! - **`get_transaction_hashes_for_block(max_count)`** returns forced-inclusion hashes first (that are still in the mempool), then regular pending TX up to `max_count`. Guarantees that forced TX are included when building the block.
 //! - Constant: `MAX_FORCED_INCLUSION_QUEUE` = 256.

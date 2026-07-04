@@ -1,6 +1,6 @@
 //! Dynamic Group-Based TX Assignment and Capacity Filtering (Module 7).
 //!
-//! **Validation Modules Analysis — Step 7:**
+//! **Validation Modules Analysis - Step 7:**
 //! - For each transaction, compute the **required total stake** for safe verification.
 //! - Form **one or more validator groups** dynamically so that each group's total stake ≥ required stake for the TX.
 //! - Each validator in a group must have **stake ≥ TX amount** (risk coverage); otherwise they cannot verify that TX.

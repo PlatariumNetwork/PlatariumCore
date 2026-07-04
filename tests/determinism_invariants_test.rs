@@ -1,4 +1,4 @@
-//! **Step 10 — Integration and Invariant Testing (Determinism Tests)**
+//! **Step 10 - Integration and Invariant Testing (Determinism Tests)**
 //!
 //! Property-based style invariants for the Consensus Engine:
 //! - Same inputs → same validator selection result

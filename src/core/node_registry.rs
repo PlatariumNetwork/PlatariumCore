@@ -1,6 +1,6 @@
 //! Node Registry & Reputation Engine (Module 1).
 //!
-//! **Validation Modules Analysis — Step 1:** Registry that stores per-node identity, stake,
+//! **Validation Modules Analysis - Step 1:** Registry that stores per-node identity, stake,
 //! reputation/uptime/latency/load scores, and vote statistics. Supports register, unregister,
 //! set scores (batch and individual), and get_eligible for consensus validator selection.
 //!
@@ -8,7 +8,7 @@
 //! All scoring uses integer arithmetic; no floating point or non-deterministic inputs.
 //!
 //! # Stored fields
-//! - `node_id`, `public_key` — identity
+//! - `node_id`, `public_key` - identity
 //! - `stake`, `reputation_score`, `uptime_score`, `latency_score`, `load_score`
 //! - `missed_votes`, `total_votes` (vote accuracy = (total - missed) / total)
 //!

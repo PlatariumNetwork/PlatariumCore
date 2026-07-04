@@ -225,8 +225,15 @@ impl State {
         self.set_asset_balance(address, &Asset::PLP, balance);
     }
 
-    /// Applies a transfer: deduct fee from uplp, amount from asset; credit amount to receiver, fee to treasury.
-    /// Fee is always μPLP. Order: fee from uplp, then asset transfer, then nonce (deterministic).
+    /// μPLP available for fees: PLP asset balance (μPLP units) plus legacy uplp pool.
+    /// Fee is not a separate currency — it is paid from the sender's PLP balance when needed.
+    pub fn fee_spendable_uplp(&self, address: &Address) -> u128 {
+        self.get_asset_balance(address, &Asset::PLP)
+            .saturating_add(self.get_uplp_balance(address))
+    }
+
+    /// Applies a transfer: deduct fee from uplp then PLP asset; amount from asset; credit receiver and treasury.
+    /// Fee is always μPLP (fraction of PLP). Order: fee, then asset transfer, then nonce (deterministic).
     pub fn apply_transfer(
         &self,
         from: &Address,
@@ -253,30 +260,60 @@ impl State {
             }
         }
         let asset_bal = ab.get(&k).copied().unwrap_or(0);
-        if asset_bal < amount {
+        let uplp_bal = ub.get(from).copied().unwrap_or(0);
+        let plp_key = Self::asset_key(from, &Asset::PLP);
+        let plp_asset_bal = ab.get(&plp_key).copied().unwrap_or(0);
+        let fee_from_plp = fee_uplp.saturating_sub(uplp_bal);
+
+        if *asset == Asset::PLP {
+            if asset_bal < amount.saturating_add(fee_from_plp) {
+                return Err(StateError::InsufficientBalance {
+                    required: amount.saturating_add(fee_from_plp),
+                    available: asset_bal,
+                }
+                .into());
+            }
+        } else if asset_bal < amount {
             return Err(StateError::InsufficientBalance {
                 required: amount,
                 available: asset_bal,
             }
             .into());
         }
-        let uplp_bal = ub.get(from).copied().unwrap_or(0);
-        if uplp_bal < fee_uplp {
+
+        let fee_pool = plp_asset_bal.saturating_add(uplp_bal);
+        if fee_pool < fee_uplp {
             return Err(StateError::InsufficientBalance {
                 required: fee_uplp,
-                available: uplp_bal,
+                available: fee_pool,
             }
             .into());
         }
 
-        ab.insert(k.clone(), asset_bal - amount);
+        // Fee: legacy uplp pool first, remainder from PLP asset balance.
+        let fee_uplp_used = fee_uplp.min(uplp_bal);
+        let fee_plp_used = fee_uplp - fee_uplp_used;
+        ub.insert(from.clone(), uplp_bal - fee_uplp_used);
+        let sender_plp_after_fee = if fee_plp_used > 0 {
+            plp_asset_bal - fee_plp_used
+        } else {
+            plp_asset_bal
+        };
+        if *asset != Asset::PLP && fee_plp_used > 0 {
+            ab.insert(plp_key.clone(), sender_plp_after_fee);
+        }
+
+        let treasury_bal = ub.get(&treasury).copied().unwrap_or(0);
+        ub.insert(treasury, treasury_bal + fee_uplp);
+
+        if *asset == Asset::PLP {
+            ab.insert(k.clone(), sender_plp_after_fee - amount);
+        } else {
+            ab.insert(k.clone(), asset_bal - amount);
+        }
         let to_k = Self::asset_key(to, asset);
         let to_bal = ab.get(&to_k).copied().unwrap_or(0);
         ab.insert(to_k, to_bal + amount);
-
-        ub.insert(from.clone(), uplp_bal - fee_uplp);
-        let treasury_bal = ub.get(&treasury).copied().unwrap_or(0);
-        ub.insert(treasury, treasury_bal + fee_uplp);
 
         if let Some(expected) = expected_nonce {
             nonces.insert(from.clone(), expected + 1);
@@ -522,6 +559,20 @@ mod tests {
         assert_eq!(state.get_nonce(&addr), 5);
     }
     
+    #[test]
+    fn test_apply_transfer_fee_from_plp_when_no_uplp() {
+        let state = State::new();
+        let sender = "sender".to_string();
+        let receiver = "receiver".to_string();
+        state.set_balance(&sender, 5000);
+        let result = state.apply_transfer(&sender, &receiver, &Asset::PLP, 100, 1, None);
+        assert!(result.is_ok());
+        assert_eq!(state.get_balance(&sender), 4899);
+        assert_eq!(state.get_balance(&receiver), 100);
+        assert_eq!(state.get_uplp_balance(&sender), 0);
+        assert_eq!(state.fee_spendable_uplp(&sender), 4899);
+    }
+
     #[test]
     fn test_apply_transfer_success() {
         let state = State::new();
