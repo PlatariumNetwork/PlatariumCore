@@ -243,8 +243,15 @@ pub fn state_credit_json(path: &Path, address: &str, plp: u128, uplp: u128, test
         ));
     }
     with_state_file_mut(path, |state| {
-        state.set_balance(&address.to_string(), plp);
-        state.set_uplp_balance(&address.to_string(), uplp);
+        let addr = address.to_string();
+        if plp > 0 {
+            let current = state.get_balance(&addr);
+            state.set_balance(&addr, current.saturating_add(plp));
+        }
+        if uplp > 0 {
+            let current = state.get_uplp_balance(&addr);
+            state.set_uplp_balance(&addr, current.saturating_add(uplp));
+        }
         let root = state.create_snapshot().compute_state_root();
         Ok(serde_json::json!({
             "ok": true,

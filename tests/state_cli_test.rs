@@ -80,3 +80,20 @@ fn state_file_roundtrip_preserves_root() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn state_credit_accumulates_balance() {
+    let path = temp_state_path("accumulate");
+    let _ = std::fs::remove_file(&path);
+    init_state_file(&path).expect("init");
+
+    state_credit_json(&path, "PxAlice", 5000, 0, true).expect("credit1");
+    state_credit_json(&path, "PxAlice", 5000, 0, true).expect("credit2");
+    let query = state_query_json(&path, "PxAlice", "PLP").expect("query");
+    assert!(
+        query.contains("\"balance\":\"10000\""),
+        "expected cumulative 10000 PLP, got {query}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
