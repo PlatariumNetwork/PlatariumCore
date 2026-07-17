@@ -193,6 +193,101 @@ enum Commands {
         producer_id: String,
     },
 
+    /// Minimum fee (μPLP) from mempool load. Output: {"min_fee_uplp": N}
+    MinFeeFromLoad {
+        #[arg(long)]
+        pending_count: usize,
+    },
+
+    /// Mempool admission (nonce queue + load fee + balance). Output: MempoolAdmitResult JSON
+    MempoolAdmit {
+        #[arg(long)]
+        state_file: String,
+        #[arg(long)]
+        tx: String,
+        /// JSON array of pending mempool txs (gateway snapshot)
+        #[arg(long)]
+        mempool_txs: String,
+    },
+
+    /// Block proposal trigger status. Output: BlockProposalStatus JSON
+    BlockProposalStatus {
+        #[arg(long)]
+        mempool_txs: String,
+        #[arg(long)]
+        now_unix: i64,
+    },
+
+    /// Select transaction hashes for next block (gas cap + nonce order). Output: SelectBlockTxsResult JSON
+    SelectBlockTxs {
+        #[arg(long)]
+        state_file: String,
+        #[arg(long)]
+        mempool_txs: String,
+    },
+
+    /// RocksDB: get chain head height
+    RocksGetHead {
+        #[arg(long)]
+        db_path: String,
+    },
+    /// RocksDB: get transaction by hash
+    RocksGetTx {
+        #[arg(long)]
+        db_path: String,
+        #[arg(long)]
+        tx_hash: String,
+    },
+    /// RocksDB: get block by height
+    RocksGetBlock {
+        #[arg(long)]
+        db_path: String,
+        #[arg(long)]
+        height: u64,
+    },
+    /// RocksDB: get account
+    RocksGetAccount {
+        #[arg(long)]
+        db_path: String,
+        #[arg(long)]
+        address: String,
+    },
+    /// RocksDB: list tx hashes for address
+    RocksListAddressTxs {
+        #[arg(long)]
+        db_path: String,
+        #[arg(long)]
+        address: String,
+    },
+    /// RocksDB: atomic commit block (BlockCommit JSON)
+    RocksCommitBlock {
+        #[arg(long)]
+        db_path: String,
+        #[arg(long)]
+        commit: String,
+    },
+    /// RocksDB: list snapshots (thin)
+    RocksListSnapshots {
+        #[arg(long)]
+        db_path: String,
+    },
+    /// RocksDB: bootstrap from snapshot JSON
+    RocksBootstrapSnapshot {
+        #[arg(long)]
+        db_path: String,
+        #[arg(long)]
+        snapshot: String,
+    },
+    /// Migrate Gateway chain JSON (+ optional accounts JSON) into RocksDB
+    MigrateJsonToRocks {
+        #[arg(long)]
+        db_path: String,
+        #[arg(long)]
+        chain_file: String,
+        #[arg(long)]
+        accounts_file: Option<String>,
+    },
+
     /// Start JSON-RPC server for Gateway native binding. TCP host:port or unix:/path
     Serve {
         /// Listen address, e.g. 127.0.0.1:19500 or unix:/tmp/platarium-core.sock
@@ -284,6 +379,37 @@ fn main() {
             tx_hashes,
             producer_id,
         } => handle_assemble_block(state_file, block_number, previous_hash, timestamp, tx_hashes, producer_id),
+        Commands::MinFeeFromLoad { pending_count } => handle_min_fee_from_load(pending_count),
+        Commands::MempoolAdmit {
+            state_file,
+            tx,
+            mempool_txs,
+        } => handle_mempool_admit(state_file, tx, mempool_txs),
+        Commands::BlockProposalStatus {
+            mempool_txs,
+            now_unix,
+        } => handle_block_proposal_status(mempool_txs, now_unix),
+        Commands::SelectBlockTxs {
+            state_file,
+            mempool_txs,
+        } => handle_select_block_txs(state_file, mempool_txs),
+        Commands::RocksGetHead { db_path } => handle_rocks_get_head(db_path),
+        Commands::RocksGetTx { db_path, tx_hash } => handle_rocks_get_tx(db_path, tx_hash),
+        Commands::RocksGetBlock { db_path, height } => handle_rocks_get_block(db_path, height),
+        Commands::RocksGetAccount { db_path, address } => handle_rocks_get_account(db_path, address),
+        Commands::RocksListAddressTxs { db_path, address } => {
+            handle_rocks_list_address_txs(db_path, address)
+        }
+        Commands::RocksCommitBlock { db_path, commit } => handle_rocks_commit_block(db_path, commit),
+        Commands::RocksListSnapshots { db_path } => handle_rocks_list_snapshots(db_path),
+        Commands::RocksBootstrapSnapshot { db_path, snapshot } => {
+            handle_rocks_bootstrap_snapshot(db_path, snapshot)
+        }
+        Commands::MigrateJsonToRocks {
+            db_path,
+            chain_file,
+            accounts_file,
+        } => handle_migrate_json_to_rocks(db_path, chain_file, accounts_file),
         Commands::SignTransaction {
             from,
             to,
@@ -559,6 +685,117 @@ fn handle_assemble_block(
         &tx_hashes,
         &producer_id,
     )?;
+    println!("{}", out);
+    Ok(())
+}
+
+fn handle_min_fee_from_load(pending_count: usize) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let out = min_fee_from_load_cli(pending_count)?;
+    println!("{}", out);
+    Ok(())
+}
+
+fn handle_rocks_get_head(db_path: String) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    println!("{}", rocks_get_head_json(&db_path)?);
+    Ok(())
+}
+
+fn handle_rocks_get_tx(
+    db_path: String,
+    tx_hash: String,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    println!("{}", rocks_get_tx_json(&db_path, &tx_hash)?);
+    Ok(())
+}
+
+fn handle_rocks_get_block(
+    db_path: String,
+    height: u64,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    println!("{}", rocks_get_block_json(&db_path, height)?);
+    Ok(())
+}
+
+fn handle_rocks_get_account(
+    db_path: String,
+    address: String,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    println!("{}", rocks_get_account_json(&db_path, &address)?);
+    Ok(())
+}
+
+fn handle_rocks_list_address_txs(
+    db_path: String,
+    address: String,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    println!("{}", rocks_list_address_txs_json(&db_path, &address)?);
+    Ok(())
+}
+
+fn handle_rocks_commit_block(
+    db_path: String,
+    commit: String,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    println!("{}", rocks_commit_block_json(&db_path, &commit)?);
+    Ok(())
+}
+
+fn handle_rocks_list_snapshots(
+    db_path: String,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    println!("{}", rocks_list_snapshots_json(&db_path)?);
+    Ok(())
+}
+
+fn handle_rocks_bootstrap_snapshot(
+    db_path: String,
+    snapshot: String,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    println!("{}", rocks_bootstrap_snapshot_json(&db_path, &snapshot)?);
+    Ok(())
+}
+
+fn handle_migrate_json_to_rocks(
+    db_path: String,
+    chain_file: String,
+    accounts_file: Option<String>,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let chain = std::fs::read_to_string(&chain_file)?;
+    let accounts = match accounts_file {
+        Some(p) => Some(std::fs::read_to_string(p)?),
+        None => None,
+    };
+    println!(
+        "{}",
+        migrate_json_to_rocks(&db_path, &chain, accounts.as_deref())?
+    );
+    Ok(())
+}
+
+fn handle_mempool_admit(
+    state_file: String,
+    tx: String,
+    mempool_txs: String,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let out = mempool_admit_json(std::path::Path::new(&state_file), &tx, &mempool_txs)?;
+    println!("{}", out);
+    Ok(())
+}
+
+fn handle_block_proposal_status(
+    mempool_txs: String,
+    now_unix: i64,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let out = block_proposal_status_json(&mempool_txs, now_unix)?;
+    println!("{}", out);
+    Ok(())
+}
+
+fn handle_select_block_txs(
+    state_file: String,
+    mempool_txs: String,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let out = select_block_txs_json(std::path::Path::new(&state_file), &mempool_txs)?;
     println!("{}", out);
     Ok(())
 }

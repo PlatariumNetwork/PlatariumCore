@@ -2,6 +2,9 @@
 //! Newline-delimited JSON over TCP or Unix domain socket.
 
 use crate::core::asset::Asset;
+use crate::core::block_proposal_cli::{
+    block_proposal_status_json, mempool_admit_json, min_fee_from_load_cli, select_block_txs_json,
+};
 use crate::core::consensus_cli::{
     assemble_block_json, l1_process_votes_json, l1_verify_txs_json, l2_process_votes_json,
 };
@@ -164,6 +167,72 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
                 &tx_hashes,
                 &producer_id,
             )
+        }
+
+        "min_fee_from_load" => {
+            let pending = param_usize(params, "pending_count")?;
+            min_fee_from_load_cli(pending)
+        }
+        "mempool_admit" => {
+            let path = param_str(params, "state_file")?;
+            let tx = param_str(params, "tx")?;
+            let mempool_txs = param_str(params, "mempool_txs")?;
+            mempool_admit_json(Path::new(&path), &tx, &mempool_txs)
+        }
+        "block_proposal_status" => {
+            let mempool_txs = param_str(params, "mempool_txs")?;
+            let now_unix = param_i64(params, "now_unix")?;
+            block_proposal_status_json(&mempool_txs, now_unix)
+        }
+        "select_block_txs" => {
+            let path = param_str(params, "state_file")?;
+            let mempool_txs = param_str(params, "mempool_txs")?;
+            select_block_txs_json(Path::new(&path), &mempool_txs)
+        }
+
+        "rocks_get_head" => {
+            let db_path = param_str(params, "db_path")?;
+            crate::storage::rpc::rocks_get_head_json(&db_path)
+        }
+        "rocks_get_tx" => {
+            let db_path = param_str(params, "db_path")?;
+            let tx_hash = param_str(params, "tx_hash")?;
+            crate::storage::rpc::rocks_get_tx_json(&db_path, &tx_hash)
+        }
+        "rocks_get_block" => {
+            let db_path = param_str(params, "db_path")?;
+            let height = param_u64(params, "height")?;
+            crate::storage::rpc::rocks_get_block_json(&db_path, height)
+        }
+        "rocks_get_account" => {
+            let db_path = param_str(params, "db_path")?;
+            let address = param_str(params, "address")?;
+            crate::storage::rpc::rocks_get_account_json(&db_path, &address)
+        }
+        "rocks_list_address_txs" => {
+            let db_path = param_str(params, "db_path")?;
+            let address = param_str(params, "address")?;
+            crate::storage::rpc::rocks_list_address_txs_json(&db_path, &address)
+        }
+        "rocks_commit_block" => {
+            let db_path = param_str(params, "db_path")?;
+            let commit = param_str(params, "commit")?;
+            crate::storage::rpc::rocks_commit_block_json(&db_path, &commit)
+        }
+        "rocks_list_snapshots" => {
+            let db_path = param_str(params, "db_path")?;
+            crate::storage::rpc::rocks_list_snapshots_json(&db_path)
+        }
+        "rocks_bootstrap_snapshot" => {
+            let db_path = param_str(params, "db_path")?;
+            let snapshot = param_str(params, "snapshot")?;
+            crate::storage::rpc::rocks_bootstrap_snapshot_json(&db_path, &snapshot)
+        }
+        "migrate_json_to_rocks" => {
+            let db_path = param_str(params, "db_path")?;
+            let chain = param_str(params, "chain_json")?;
+            let accounts = param_opt_str(params, "accounts_json");
+            crate::storage::rpc::migrate_json_to_rocks(&db_path, &chain, accounts.as_deref())
         }
 
         "selection_percent_from_load" => {

@@ -5,6 +5,7 @@ pub mod signature;
 pub mod utils;
 pub mod error;
 pub mod core;
+pub mod storage;
 
 pub use mnemonic::{generate_mnemonic, validate_mnemonic, CHARACTER_SET};
 pub use key_generator::{KeyGenerator, KeyPair, DerivationPaths, generate_alphanumeric_part};
@@ -144,4 +145,28 @@ pub use core::consensus_cli::{
     l1_process_votes_json,
     l1_verify_txs_json,
     l2_process_votes_json,
+};
+pub use core::block_proposal_cli::{
+    block_proposal_status_json,
+    mempool_admit_json,
+    min_fee_from_load_cli,
+    select_block_txs_json,
+};
+pub use core::block_proposal::{
+    block_proposal_status, mempool_admit, parse_mempool_snapshot, select_block_txs,
+    MempoolSnapshotEntry,
+};
+pub use core::consensus_params::{
+    BLOCK_GAS_CAP_UPLP, BLOCK_MAX_TX_COUNT, BLOCK_MAX_WAIT_SEC, BLOCK_MIN_GAS_UPLP,
+    BLOCK_MIN_TX_COUNT, FAUCET_ADDRESS,
+};
+pub use storage::{
+    AccountRecord, BlockCommit, BlockRecordStored, ReceiptRecord, RocksStore, SNAPSHOT_INTERVAL,
+    SnapshotMeta, SCHEMA_VERSION, bootstrap_from_snapshot, build_commit_batch, commit_block,
+    create_snapshot_if_due, get_account, get_block, get_head, get_receipt, get_state_root, get_tx,
+    list_snapshots, list_tx_hashes_for_address, migrate_json_to_rocks, open_store,
+    rocks_bootstrap_snapshot_json, rocks_commit_block_json, rocks_get_account_json,
+    rocks_get_block_json, rocks_get_head_json, rocks_get_receipt_json, rocks_get_snapshot_json,
+    rocks_get_state_root_json, rocks_get_tx_json, rocks_list_address_txs_json,
+    rocks_list_snapshots_json,
 };

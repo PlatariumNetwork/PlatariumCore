@@ -1,6 +1,6 @@
 [package]
 name = "platarium-core"
-version = "1.0.0"
+version = "1.0.5"
 edition = "2021"
 authors = ["Platarium Team"]
 description = "High-performance cryptographic core library for Platarium Network, implemented in Rust. Supports BIP39 mnemonic generation, BIP32 HD wallets, ECDSA secp256k1 signatures, and HKDF key derivation."
@@ -45,12 +45,19 @@ rand = "0.8"
 bytes = "1.5"
 # CLI argument parsing
 clap = { version = "4.5", features = ["derive"] }
+# Canonical chain storage (native C++ via librocksdb-sys; first build is slow)
+rocksdb = "0.22"
 
 [dev-dependencies]
+tempfile = "3"
 
 [[test]]
 name = "integration"
 path = "tests/integration_test.rs"
+
+[[test]]
+name = "block_formation"
+path = "tests/block_formation_test.rs"
 
 [[test]]
 name = "determinism_invariants"

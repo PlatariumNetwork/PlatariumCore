@@ -5,8 +5,9 @@
 # Platarium Core
 
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+[![RocksDB](https://img.shields.io/badge/RocksDB-8.10-2B6DB2.svg?logo=rocksdb&logoColor=white)](https://rocksdb.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![CI](https://img.shields.io/badge/CI-passing-brightgreen.svg)]
+![CI](https://img.shields.io/badge/CI-passing-brightgreen.svg)
 
 High-performance cryptographic core library for Platarium Network, implemented in Rust.
 
@@ -24,6 +25,11 @@ High-performance cryptographic core library for Platarium Network, implemented i
 - **Dynamic Fee Calculation** - Load-based fee system with micro-PLP (μPLP) units; fee always μPLP
 - **Deterministic Execution** - Guaranteed reproducibility (no randomness, no system time)
 - **Consensus Building Blocks** - Node registry, dynamic validator selection (L1/L2), L1 confirmation, block assembly, slashing (Modules 1–5)
+- **Core-Owned Block Formation** - Admission, proposal trigger, gas-cap packing, nonce ordering, and block assembly are defined in Rust Core
+- **Canonical RocksDB Storage** - Accounts, transactions, blocks, receipts, state roots, and indexes are owned by Core
+- **Atomic Block Commits** - A finalized block and all related state are persisted in one RocksDB `WriteBatch`
+- **Persistent State Snapshots** - Bootstrap snapshots are created every 10,000 blocks
+- **RAM-Only Mempool** - Pending transactions are intentionally not persisted; clients rebroadcast after a restart
 - **Zero-Cost Abstractions** - Native performance with Rust's type safety
 
 ## Installation
@@ -32,6 +38,11 @@ High-performance cryptographic core library for Platarium Network, implemented i
 
 - Rust 1.70 or later ([Install Rust](https://www.rust-lang.org/tools/install))
 - Cargo (comes with Rust)
+- A C++ toolchain for the native `librocksdb-sys` build:
+  - macOS: Xcode Command Line Tools
+  - Linux: `build-essential`, `clang`, `cmake`, and `pkg-config`
+
+The first RocksDB build can take significantly longer than subsequent incremental builds.
 
 ### Build
 
@@ -142,6 +153,59 @@ platarium-cli verify-signature \
 - `--signature` / `-s`: Signature in hex format (compact or DER) (required)
 - `--pubkey` / `-p`: Public key in hex format (required)
 
+#### Block Proposal and Mempool Admission
+
+Consensus parameters are protocol constants in Core, not environment configuration:
+
+- block gas cap: `5000 μPLP`;
+- minimum block size: one transaction;
+- maximum wait for the oldest transaction: five seconds;
+- hard limit: 500 transactions per block;
+- minimum fee: `1/2/3/5 μPLP` according to mempool load.
+
+```bash
+platarium-cli min-fee-from-load --pending-count 100
+platarium-cli mempool-admit \
+ --state-file ./data/core-state.json \
+ --tx '{"...":"..."}' \
+ --mempool-txs '[]'
+platarium-cli block-proposal-status \
+ --mempool-txs '[]' \
+ --now-unix 1700000000
+platarium-cli select-block-txs \
+ --state-file ./data/core-state.json \
+ --mempool-txs '[]'
+```
+
+Core validates nonce order, load-based fee, fee budget, and reserved pending balances. If the
+gas cap is reached, remaining transactions stay in the RAM mempool for the next block.
+
+#### RocksDB Storage
+
+Set `PLATARIUM_ROCKSDB_PATH` or pass `--db-path` explicitly. The default application path is
+`{data_dir}/rocksdb`.
+
+```bash
+platarium-cli rocks-get-head --db-path ./data/rocksdb
+platarium-cli rocks-get-tx --db-path ./data/rocksdb --tx-hash HASH
+platarium-cli rocks-get-block --db-path ./data/rocksdb --height 1
+platarium-cli rocks-get-account --db-path ./data/rocksdb --address PxADDRESS
+platarium-cli rocks-list-address-txs --db-path ./data/rocksdb --address PxADDRESS
+platarium-cli rocks-list-snapshots --db-path ./data/rocksdb
+```
+
+Atomic block commit and snapshot bootstrap are available through `rocks-commit-block` and
+`rocks-bootstrap-snapshot`. A legacy JSON chain can be imported once:
+
+```bash
+platarium-cli migrate-json-to-rocks \
+ --db-path ./data/rocksdb \
+ --chain-file ./data/node-chain.json \
+ --accounts-file ./data/accounts-export.json
+```
+
+Only one writer process may open a given RocksDB path.
+
 ## Testing
 
 Run all tests to verify functionality of all modules:
@@ -151,7 +215,7 @@ Run all tests to verify functionality of all modules:
 cargo test
 
 # Run only integration tests
-cargo test --test integration_test
+cargo test --test integration
 
 # Run only module tests
 cargo test --test module_test
@@ -161,23 +225,27 @@ cargo test -- --nocapture
 
 # Or use the test script
 ./tests/run_all_tests.sh
+
+# RocksDB storage: open/reopen, atomic commit, crash-before-write, snapshots
+cargo test --lib storage::
+
+# Block proposal: gas, nonce, fee, waiting, and balance reservation
+cargo test --lib block_proposal
+
+# End-to-end block formation and durable RocksDB state
+cargo test --test block_formation
 ```
 
 ### Test Coverage
 
 - **13 integration tests** - End-to-end workflow tests
 - **6 module tests** - Module-level integration tests
-- **116 unit tests** - Comprehensive unit test coverage across all modules
- - **9 transaction tests** - Transaction structure, validation, hash, multi-asset
- - **39 state tests** - State management, snapshots, restore, asset/uplp balances
- - **11 execution tests** - Execution logic, simulation, context handling
- - **12 mempool tests** - Transaction pool management (incl. fairness / anti-starvation)
- - **24 fee calculation tests** - Fee computation, load multipliers, micro-PLP
- - **7 determinism tests** - Determinism verification across modules
- - **4 core tests** - Core engine integration
- - **Additional tests** - Mnemonic, keys, signatures, utilities, asset
+- **5 RocksDB storage tests** - Open/reopen, atomic commit, crash-before-write, and snapshots
+- **8 block proposal tests** - Gas cap, nonce gaps, wait trigger, fee admission, and balance reservation
+- **16 block formation tests** - Integration, crash consistency, gas spill, eventual inclusion, and snapshot bootstrap
+- **Additional unit tests** - Transactions, state, execution, mempool, fees, determinism, cryptography, and utilities
 - **Full workflow tests** - Complete transaction lifecycle
-- **Snapshot and restore tests** - Included in state tests (25+ tests)
+- **Snapshot tests** - In-memory rollback snapshots and persistent RocksDB bootstrap snapshots
 - **Determinism verification tests** - Cross-module determinism checks
 
 ## Usage
@@ -507,15 +575,27 @@ PlatariumCore/
 │ │ ├── mempool.rs # Transaction pool (incl. forced inclusion)
 │ │ ├── execution.rs # Execution logic and simulation
 │ │ ├── fee.rs # Fee calculation (micro-PLP)
+│ │ ├── consensus_params.rs # Protocol block limits (not environment-configurable)
+│ │ ├── block_proposal.rs # Admission, proposal trigger, gas/nonce packing
+│ │ ├── block_proposal_cli.rs # Block proposal CLI adapters
 │ │ ├── determinism.rs # Determinism audit and enforcement
 │ │ ├── node_registry.rs # Module 1: Node registry & rating engine
 │ │ ├── validator_selection.rs # Module 2: Dynamic validator selection (L1/L2)
 │ │ ├── confirmation_layer.rs # Module 3: L1 transaction confirmation
 │ │ ├── block_assembly.rs # Module 4: Block assembly & L2 block validators
 │ │ └── slashing.rs # Module 5: Slashing & stability engine
+│ ├── storage/ # Canonical RocksDB storage owned by Core
+│ │ ├── schema.rs # Versioned key encoding and indexes
+│ │ ├── migrations.rs # Schema initialization and upgrades
+│ │ ├── rocks.rs # Database open path and WriteBatch wrapper
+│ │ ├── commit.rs # Atomic finalized-block commit
+│ │ ├── query.rs # Account, TX, block, receipt, root, and index reads
+│ │ ├── rpc.rs # Storage CLI/RPC adapters and JSON migration
+│ │ └── snapshot.rs # Persistent snapshots every 10,000 blocks
 │ └── main.rs # CLI entry point
 ├── tests/
 │ ├── integration_test.rs # Integration tests
+│ ├── block_formation_test.rs # Block formation, crash, gas/nonce, and snapshot tests
 │ ├── module_test.rs # Module tests
 │ └── run_all_tests.sh # Test runner script
 └── Cargo.toml
@@ -538,7 +618,31 @@ The core includes deterministic, integer-only consensus building blocks (no RNG 
 | **9. Deterministic Randomness for Validator Selection** | `validator_selection.rs` | **Step 9.** `global_entropy = hash(prev_finalized_block)`; `seed = SHA256(block_number \|\| global_entropy)` (`compute_seed` / `committee_selection_seed`); deterministic L1/L2 selection so every node can verify committees. |
 | **10. Integration & Invariant Testing (Determinism)** | `tests/determinism_invariants_test.rs`, `core/determinism.rs` | **Step 10.** Property-style tests: same inputs → same validator selection; same seed → same committee; same TX/state → same state_root; no float/RNG/system time in consensus path. |
 
-Flow: **TX → Mempool → (assign TX to groups) → L1 validators → Confirmed TX pool → Block assembler → L2 validators → Block finalized.**
+Flow: **TX → Core admission → RAM mempool → Core proposal/packing → L1 validators → Core block assembly → L2 validators → block finalized → atomic RocksDB `WriteBatch`.**
+
+### Canonical Storage and Snapshot Types
+
+RocksDB inside PlatariumCore is the source of truth for confirmed chain data:
+
+- accounts and nonces;
+- full transactions and blocks;
+- transaction receipts;
+- state roots by height;
+- address-to-transaction and block-to-transaction indexes;
+- chain head and schema version.
+
+`commit_block` writes the block, transactions, changed accounts, receipts, state root, indexes,
+and new head atomically. A failed write cannot expose a partial block.
+
+The two snapshot mechanisms have different purposes:
+
+- **`StateSnapshot`** is an O(1), in-memory copy-on-write snapshot used for execution simulation
+  and rollback. It is not node persistence.
+- **RocksDB snapshot** is a persistent account-state export created every 10,000 blocks and used
+  to bootstrap a node before applying catch-up blocks.
+
+The mempool remains RAM-only. After a process restart, confirmed state is recovered from RocksDB,
+while clients rebroadcast transactions that were not yet confirmed.
 
 ## Modules
 
@@ -692,7 +796,7 @@ Flow: **TX → Mempool → (assign TX to groups) → L1 validators → Confirmed
 
 - **Memory Safety** - Rust's ownership system prevents memory-related vulnerabilities
 - **Type Safety** - Compile-time type checking prevents runtime errors
-- **No Runtime Dependencies** - Single binary, no external dependencies at runtime
+- **Native Storage** - RocksDB is linked through `librocksdb-sys`; building requires a C++ toolchain
 - **Cryptographic Best Practices** - Uses well-tested libraries (secp256k1, BIP39, BIP32)
 
 
