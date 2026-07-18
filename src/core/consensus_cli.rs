@@ -9,32 +9,99 @@ use std::path::Path;
 
 /// Verify all transactions for L1 against current state (signature, fee, balance, nonce).
 /// Returns per-transaction results in `tx_results` for multi-TX blocks.
+///
+/// Important: verification is **sequential with simulate-apply**. A block may contain
+/// several txs from the same sender (nonce N, N+1, …). Checking every tx against the
+/// unmodified state would falsely mark N+1 as invalid and cause the Gateway to drop
+/// still-valid mempool entries. After each valid tx we apply it to a working copy of
+/// state so later nonces/balances see prior effects. The on-disk state file is never
+/// modified here.
 pub fn l1_verify_txs_json(path: &Path, txs_json: &str) -> Result<String> {
     let state = load_state_file(path)?;
     let txs: Vec<String> = serde_json::from_str(txs_json)
         .map_err(|e| PlatariumError::State(format!("invalid txs JSON array: {}", e)))?;
     let mut tx_results = Vec::new();
+    let mut all_valid = true;
+    let mut first_error: Option<String> = None;
     for tx_json in &txs {
-        let tx = Transaction::from_gateway_json(tx_json)?;
-        let valid = verify_tx_for_l1(&state, &tx)?;
-        tx_results.push(serde_json::json!({
-            "hash": tx.hash,
-            "valid": valid,
-        }));
-        if !valid {
-            return Ok(serde_json::json!({
-                "valid": false,
-                "error": format!("L1 verification failed for tx {}", tx.hash),
-                "tx_results": tx_results,
-            })
-            .to_string());
+        let tx = match Transaction::from_gateway_json(tx_json) {
+            Ok(t) => t,
+            Err(e) => {
+                all_valid = false;
+                let msg = format!("invalid tx JSON: {}", e);
+                if first_error.is_none() {
+                    first_error = Some(msg.clone());
+                }
+                tx_results.push(serde_json::json!({
+                    "hash": "",
+                    "valid": false,
+                    "error": msg,
+                }));
+                continue;
+            }
+        };
+        match verify_tx_for_l1(&state, &tx) {
+            Ok(true) => {
+                // Advance the working state so the next tx in this pack is checked
+                // against post-apply nonce/balance (same order as real L2 apply).
+                if let Err(e) = state.apply_transaction(&tx) {
+                    all_valid = false;
+                    let msg = format!("L1 simulate-apply failed for tx {}: {}", tx.hash, e);
+                    if first_error.is_none() {
+                        first_error = Some(msg.clone());
+                    }
+                    tx_results.push(serde_json::json!({
+                        "hash": tx.hash,
+                        "valid": false,
+                        "error": msg,
+                    }));
+                    continue;
+                }
+                tx_results.push(serde_json::json!({
+                    "hash": tx.hash,
+                    "valid": true,
+                }));
+            }
+            Ok(false) => {
+                all_valid = false;
+                let msg = format!("L1 verification failed for tx {}", tx.hash);
+                if first_error.is_none() {
+                    first_error = Some(msg.clone());
+                }
+                tx_results.push(serde_json::json!({
+                    "hash": tx.hash,
+                    "valid": false,
+                    "error": msg,
+                }));
+            }
+            Err(e) => {
+                all_valid = false;
+                let msg = format!("L1 verification error for tx {}: {}", tx.hash, e);
+                if first_error.is_none() {
+                    first_error = Some(msg.clone());
+                }
+                tx_results.push(serde_json::json!({
+                    "hash": tx.hash,
+                    "valid": false,
+                    "error": msg,
+                }));
+            }
         }
     }
-    Ok(serde_json::json!({
-        "valid": true,
-        "tx_results": tx_results,
-    })
-    .to_string())
+    if all_valid {
+        Ok(serde_json::json!({
+            "valid": true,
+            "tx_results": tx_results,
+        })
+        .to_string())
+    } else {
+        Ok(serde_json::json!({
+            "valid": false,
+            "error": first_error.unwrap_or_else(|| "L1 verification failed".into()),
+            "tx_results": tx_results,
+        })
+        .to_string())
+    }
 }
 
 /// Aggregate L1 votes. Input: JSON array of {"node_id":"...","yes":true|false}.

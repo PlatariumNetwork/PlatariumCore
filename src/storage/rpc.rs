@@ -106,6 +106,55 @@ pub fn rocks_get_state_root_json(db_path: &str, height: u64) -> Result<String> {
     }
 }
 
+/// Accept either a JSON array of [`AccountRecord`] or a Core [`StateFileData`] object.
+fn parse_accounts_for_migration(
+    accounts_json: &str,
+) -> Result<Vec<crate::storage::commit::AccountRecord>> {
+    if let Ok(accounts) =
+        serde_json::from_str::<Vec<crate::storage::commit::AccountRecord>>(accounts_json)
+    {
+        return Ok(accounts);
+    }
+
+    let state: crate::core::state_file::StateFileData = serde_json::from_str(accounts_json)
+        .map_err(|e| {
+            PlatariumError::State(format!(
+                "invalid accounts JSON (expected AccountRecord[] or Core state file): {}",
+                e
+            ))
+        })?;
+
+    let mut bal = std::collections::BTreeMap::<String, String>::new();
+    let mut uplp = std::collections::BTreeMap::<String, String>::new();
+    let mut nonces = std::collections::BTreeMap::<String, u64>::new();
+
+    for (addr, asset, balance) in state.asset_balances {
+        if asset == "PLP" {
+            bal.insert(addr, balance);
+        }
+    }
+    for (addr, balance) in state.uplp_balances {
+        uplp.insert(addr, balance);
+    }
+    for (addr, nonce) in state.nonces {
+        nonces.insert(addr, nonce);
+    }
+
+    let mut addrs: std::collections::BTreeSet<String> = bal.keys().cloned().collect();
+    addrs.extend(uplp.keys().cloned());
+    addrs.extend(nonces.keys().cloned());
+
+    Ok(addrs
+        .into_iter()
+        .map(|address| crate::storage::commit::AccountRecord {
+            balance: bal.get(&address).cloned().unwrap_or_else(|| "0".into()),
+            uplp_balance: uplp.get(&address).cloned().unwrap_or_else(|| "0".into()),
+            nonce: nonces.get(&address).copied().unwrap_or(0),
+            address,
+        })
+        .collect())
+}
+
 /// One-shot import: JSON chain file (Gateway ChainFileData) + optional state into RocksDB.
 pub fn migrate_json_to_rocks(
     db_path: &str,
@@ -117,9 +166,7 @@ pub fn migrate_json_to_rocks(
         .map_err(|e| PlatariumError::State(format!("invalid chain JSON: {}", e)))?;
 
     if let Some(accounts_json) = state_accounts_json {
-        let accounts: Vec<crate::storage::commit::AccountRecord> =
-            serde_json::from_str(accounts_json)
-                .map_err(|e| PlatariumError::State(format!("invalid accounts JSON: {}", e)))?;
+        let accounts = parse_accounts_for_migration(accounts_json)?;
         let mut batch = rocksdb::WriteBatch::default();
         for acct in &accounts {
             let bytes = serde_json::to_vec(acct)
