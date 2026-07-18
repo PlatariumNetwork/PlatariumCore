@@ -455,6 +455,7 @@ fn handle_select_committee(
     seed_hex: String,
     count: usize,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let candidates = resolve_cli_json_arg(&candidates)?;
     #[derive(serde::Deserialize)]
     struct Candidate {
         id: String,
@@ -526,6 +527,7 @@ fn handle_sign_message(
         return Err("Invalid mnemonic phrase".into());
     }
 
+    let message_str = resolve_cli_json_arg(&message_str)?;
     // Parse JSON message
     let message: serde_json::Value = serde_json::from_str(&message_str)
         .map_err(|e| format!("Invalid JSON message: {}", e))?;
@@ -581,6 +583,7 @@ fn handle_validate_tx(
     tx_json: String,
     state_file: Option<String>,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let tx_json = resolve_cli_json_arg(&tx_json)?;
     let out = if let Some(path) = state_file {
         state_validate_tx_json(std::path::Path::new(&path), &tx_json)?
     } else {
@@ -619,6 +622,7 @@ fn handle_state_validate_tx(
     state_file: String,
     tx: String,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let tx = resolve_cli_json_arg(&tx)?;
     let out = state_validate_tx_json(std::path::Path::new(&state_file), &tx)?;
     println!("{}", out);
     Ok(())
@@ -628,6 +632,7 @@ fn handle_state_apply_tx(
     state_file: String,
     tx: String,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let tx = resolve_cli_json_arg(&tx)?;
     let out = state_apply_tx_json(std::path::Path::new(&state_file), &tx)?;
     println!("{}", out);
     Ok(())
@@ -651,19 +656,33 @@ fn handle_state_root(state_file: String) -> std::result::Result<(), Box<dyn std:
     Ok(())
 }
 
+/// CLI JSON args may be inline or `@/path/to/file` (Gateway spills oversized argv past ARG_MAX).
+fn resolve_cli_json_arg(s: &str) -> std::result::Result<String, Box<dyn std::error::Error>> {
+    let t = s.trim();
+    if let Some(path) = t.strip_prefix('@') {
+        let data = std::fs::read_to_string(path)
+            .map_err(|e| format!("read CLI arg file {path}: {e}"))?;
+        return Ok(data);
+    }
+    Ok(s.to_string())
+}
+
 fn handle_l1_verify_txs(state_file: String, txs: String) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let txs = resolve_cli_json_arg(&txs)?;
     let out = l1_verify_txs_json(std::path::Path::new(&state_file), &txs)?;
     println!("{}", out);
     Ok(())
 }
 
 fn handle_l1_process_votes(votes: String) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let votes = resolve_cli_json_arg(&votes)?;
     let out = l1_process_votes_json(&votes)?;
     println!("{}", out);
     Ok(())
 }
 
 fn handle_l2_process_votes(votes: String) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let votes = resolve_cli_json_arg(&votes)?;
     let out = l2_process_votes_json(&votes)?;
     println!("{}", out);
     Ok(())
@@ -677,6 +696,7 @@ fn handle_assemble_block(
     tx_hashes: String,
     producer_id: String,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let tx_hashes = resolve_cli_json_arg(&tx_hashes)?;
     let out = assemble_block_json(
         std::path::Path::new(&state_file),
         block_number,
@@ -777,6 +797,8 @@ fn handle_mempool_admit(
     tx: String,
     mempool_txs: String,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let tx = resolve_cli_json_arg(&tx)?;
+    let mempool_txs = resolve_cli_json_arg(&mempool_txs)?;
     let out = mempool_admit_json(std::path::Path::new(&state_file), &tx, &mempool_txs)?;
     println!("{}", out);
     Ok(())
@@ -786,6 +808,7 @@ fn handle_block_proposal_status(
     mempool_txs: String,
     now_unix: i64,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mempool_txs = resolve_cli_json_arg(&mempool_txs)?;
     let out = block_proposal_status_json(&mempool_txs, now_unix)?;
     println!("{}", out);
     Ok(())
@@ -795,6 +818,7 @@ fn handle_select_block_txs(
     state_file: String,
     mempool_txs: String,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mempool_txs = resolve_cli_json_arg(&mempool_txs)?;
     let out = select_block_txs_json(std::path::Path::new(&state_file), &mempool_txs)?;
     println!("{}", out);
     Ok(())
