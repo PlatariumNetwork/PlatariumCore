@@ -3,7 +3,7 @@
 use crate::core::asset::Asset;
 use crate::core::consensus_params::{
     BLOCK_GAS_CAP_UPLP, BLOCK_MAX_TX_COUNT, BLOCK_MAX_WAIT_SEC, BLOCK_MIN_GAS_UPLP,
-    BLOCK_MIN_TX_COUNT, FAUCET_ADDRESS,
+    BLOCK_MIN_TX_COUNT, FAUCET_ADDRESS, MEMPOOL_MAX_NONCE_GAP,
 };
 use crate::core::execution::ExecutionLogic;
 use crate::core::fee::calculate_fee_from_load;
@@ -160,18 +160,44 @@ pub fn mempool_admit(
     }
 
     let chain_nonce = state.get_nonce(&tx.from);
-    let expected = chain_nonce + pending_count_from(mempool, &tx.from);
-    if tx.nonce != expected {
+    let contiguous_tip = contiguous_next_nonce(mempool, &tx.from, chain_nonce);
+    // Contiguous tip = next nonce packing will take. Stale = below chain head.
+    // Future nonces (tip < nonce <= tip+GAP) are held until the gap fills —
+    // required for parallel allocate→submit over HTTP.
+    if tx.nonce < chain_nonce {
         return MempoolAdmitResult {
             accepted: false,
             error: Some(format!(
-                "invalid nonce: expected {}, got {}",
-                expected, tx.nonce
+                "invalid nonce: expected {}, got {} (stale)",
+                contiguous_tip, tx.nonce
             )),
             min_fee_uplp: min_fee,
-            expected_nonce: expected,
+            expected_nonce: contiguous_tip,
         };
     }
+    if nonce_already_pending(mempool, &tx.from, tx.nonce) {
+        return MempoolAdmitResult {
+            accepted: false,
+            error: Some(format!(
+                "invalid nonce: {} already in mempool for {}",
+                tx.nonce, tx.from
+            )),
+            min_fee_uplp: min_fee,
+            expected_nonce: contiguous_tip,
+        };
+    }
+    if tx.nonce > contiguous_tip.saturating_add(MEMPOOL_MAX_NONCE_GAP) {
+        return MempoolAdmitResult {
+            accepted: false,
+            error: Some(format!(
+                "invalid nonce: expected {}, got {} (gap > {})",
+                contiguous_tip, tx.nonce, MEMPOOL_MAX_NONCE_GAP
+            )),
+            min_fee_uplp: min_fee,
+            expected_nonce: contiguous_tip,
+        };
+    }
+    let expected = contiguous_tip;
 
     if tx.fee_uplp < min_fee as u128 {
         return MempoolAdmitResult {
@@ -318,6 +344,24 @@ fn pending_count_from(mempool: &[MempoolSnapshotEntry], from: &str) -> u64 {
         .count() as u64
 }
 
+/// Next nonce packing will consume for `from` (chain head, then contiguous mempool).
+fn contiguous_next_nonce(mempool: &[MempoolSnapshotEntry], from: &str, chain_nonce: u64) -> u64 {
+    let mut next = chain_nonce;
+    loop {
+        if nonce_already_pending(mempool, from, next) {
+            next += 1;
+        } else {
+            return next;
+        }
+    }
+}
+
+fn nonce_already_pending(mempool: &[MempoolSnapshotEntry], from: &str, nonce: u64) -> bool {
+    mempool
+        .iter()
+        .any(|e| e.tx.from == from && e.tx.nonce == nonce)
+}
+
 fn pending_reserve(mempool: &[MempoolSnapshotEntry], from: &str) -> (u128, u128) {
     let mut plp: u128 = 0;
     let mut fee: u128 = 0;
@@ -453,10 +497,32 @@ mod tests {
     }
 
     #[test]
-    fn mempool_admit_rejects_bad_nonce() {
+    fn mempool_admit_rejects_stale_nonce() {
+        let state = State::new();
+        state.set_balance(&"PxA".to_string(), 1000);
+        state.set_nonce(&"PxA".to_string(), 3);
+        let tx = r#"{"hash":"t1","from":"PxA","to":"PxB","asset":"PLP","amount":1,"fee_uplp":1,"nonce":1,"reads":[],"writes":[],"sig_main":"aa","sig_derived":"bb"}"#;
+        let r = mempool_admit(&state, tx, &[]);
+        assert!(!r.accepted);
+        assert!(r.error.as_deref().unwrap_or("").contains("stale"));
+    }
+
+    #[test]
+    fn mempool_admit_allows_future_nonce_within_gap() {
         let state = State::new();
         state.set_balance(&"PxA".to_string(), 1000);
         let tx = r#"{"hash":"t1","from":"PxA","to":"PxB","asset":"PLP","amount":1,"fee_uplp":1,"nonce":5,"reads":[],"writes":[],"sig_main":"aa","sig_derived":"bb"}"#;
+        let r = mempool_admit(&state, tx, &[]);
+        assert!(r.accepted, "{:?}", r.error);
+        assert_eq!(r.expected_nonce, 0);
+    }
+
+    #[test]
+    fn mempool_admit_rejects_bad_nonce() {
+        let state = State::new();
+        state.set_balance(&"PxA".to_string(), 1000);
+        // Far beyond MEMPOOL_MAX_NONCE_GAP from tip 0.
+        let tx = r#"{"hash":"t1","from":"PxA","to":"PxB","asset":"PLP","amount":1,"fee_uplp":1,"nonce":100,"reads":[],"writes":[],"sig_main":"aa","sig_derived":"bb"}"#;
         let r = mempool_admit(&state, tx, &[]);
         assert!(!r.accepted);
         assert_eq!(r.expected_nonce, 0);

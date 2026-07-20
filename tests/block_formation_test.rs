@@ -80,13 +80,11 @@ fn min_fee_from_load_buckets() {
 fn mempool_admit_rejects_bad_nonce() {
     let state = State::new();
     state.set_balance(&"PxA".to_string(), 1000);
-    let tx = entry_json("t1", "PxA", 5, 1, 1, 0);
-    // Strip arrival_index for from_gateway_json — use raw tx fields via admit with empty mempool.
-    let tx_only = r#"{"hash":"t1","from":"PxA","to":"PxRecv","asset":"PLP","amount":1,"fee_uplp":1,"nonce":5,"reads":[],"writes":[],"sig_main":"aa","sig_derived":"bb"}"#;
+    // Beyond MEMPOOL_MAX_NONCE_GAP (64) from tip 0.
+    let tx_only = r#"{"hash":"t1","from":"PxA","to":"PxRecv","asset":"PLP","amount":1,"fee_uplp":1,"nonce":100,"reads":[],"writes":[],"sig_main":"aa","sig_derived":"bb"}"#;
     let r = mempool_admit(&state, tx_only, &[]);
     assert!(!r.accepted);
     assert_eq!(r.expected_nonce, 0);
-    let _ = tx;
 }
 
 #[test]

@@ -17,3 +17,8 @@ pub const BLOCK_MAX_TX_COUNT: usize = 500;
 
 /// Gateway faucet pseudo-address (matches PlatariumGatewayGO).
 pub const FAUCET_ADDRESS: &str = "faucet";
+
+/// Max how far ahead of the contiguous tip a mempool tx nonce may be.
+/// Allows parallel HTTP submits after Gateway `/api/nonce/allocate` without
+/// requiring in-order arrival. Packing still requires consecutive nonces.
+pub const MEMPOOL_MAX_NONCE_GAP: u64 = 64;
