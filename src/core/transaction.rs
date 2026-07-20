@@ -235,8 +235,18 @@ impl Transaction {
         } else {
             Asset::Token(asset_str.to_string())
         };
-        let amount = parse_u128_json(&v["amount"]).ok_or_else(|| PlatariumError::Signature("missing or invalid amount".into()))?;
-        let fee_uplp = parse_u128_json(&v["fee_uplp"]).ok_or_else(|| PlatariumError::Signature("missing or invalid fee_uplp".into()))?;
+        let amount = parse_u128_json(&v["amount"]).map_err(|e| {
+            PlatariumError::Signature(format!(
+                "invalid amount: {}. Amount must be integer μPLP (1 PLP = 1_000_000 μPLP). Example: 0.001 PLP → amount 1000. Convert before signing — Core will not rewrite a signed amount.",
+                e
+            ))
+        })?;
+        let fee_uplp = parse_u128_json(&v["fee_uplp"]).map_err(|e| {
+            PlatariumError::Signature(format!(
+                "invalid fee_uplp: {}. Fee must be integer μPLP (>= 1).",
+                e
+            ))
+        })?;
         let nonce = v["nonce"].as_u64().ok_or_else(|| PlatariumError::Signature("missing or invalid nonce".into()))?;
         let reads: HashSet<String> = v["reads"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
         let writes: HashSet<String> = v["writes"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
@@ -268,14 +278,34 @@ impl Transaction {
     }
 }
 
-fn parse_u128_json(v: &serde_json::Value) -> Option<u128> {
+fn parse_u128_json(v: &serde_json::Value) -> std::result::Result<u128, String> {
+    if v.is_null() {
+        return Err("missing value".into());
+    }
     if let Some(n) = v.as_u64() {
-        return Some(n as u128);
+        return Ok(n as u128);
+    }
+    // Whole numbers encoded as f64 (e.g. 100.0) — accept only exact integers.
+    if let Some(f) = v.as_f64() {
+        if f.fract() == 0.0 && f > 0.0 && f <= u64::MAX as f64 {
+            return Ok(f as u64 as u128);
+        }
+        return Err(format!(
+            "got decimal/float {f} (not allowed). Use integer μPLP; 0.001 PLP = 1000"
+        ));
     }
     if let Some(s) = v.as_str() {
-        return s.parse::<u128>().ok();
+        let t = s.trim();
+        if t.contains('.') || t.contains('e') || t.contains('E') {
+            return Err(format!(
+                "got decimal string {t:?} (not allowed). Use integer μPLP; 0.001 PLP = 1000"
+            ));
+        }
+        return t
+            .parse::<u128>()
+            .map_err(|_| format!("cannot parse {t:?} as u128"));
     }
-    None
+    Err(format!("unsupported JSON type for integer amount: {v}"))
 }
 
 #[cfg(test)]
