@@ -1,0 +1,15 @@
+# Build linux/amd64 platarium-cli (for VPS deploy when the host cannot compile RocksDB).
+# Usage:
+#   docker build --platform linux/amd64 -f Dockerfile.linux-cli -t platarium-cli-linux .
+#   docker create --name pcl platarium-cli-linux && docker cp pcl:/out/platarium-cli ./platarium-cli-linux && docker rm pcl
+FROM rust:1.83-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang cmake pkg-config g++ libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY . .
+ENV CARGO_BUILD_JOBS=2
+RUN cargo build --release --bin platarium-cli
+
+FROM debian:bookworm-slim
+COPY --from=build /app/target/release/platarium-cli /out/platarium-cli

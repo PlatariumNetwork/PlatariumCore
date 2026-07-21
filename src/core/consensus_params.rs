@@ -1,7 +1,8 @@
 //! Protocol constants for gas-triggered block assembly (consensus; not env-configurable).
 
 /// Maximum sum of `fee_uplp` (μPLP) per block.
-pub const BLOCK_GAS_CAP_UPLP: u64 = 5000;
+/// 500 000 μPLP ≈ 50 000 txs at FEE_UPLP=10 — effectively unlimited for testnet.
+pub const BLOCK_GAS_CAP_UPLP: u64 = 500_000;
 
 /// Propose a block when mempool has at least this many transactions.
 pub const BLOCK_MIN_TX_COUNT: usize = 1;
@@ -13,7 +14,7 @@ pub const BLOCK_MIN_GAS_UPLP: u64 = 1;
 pub const BLOCK_MAX_WAIT_SEC: i64 = 5;
 
 /// Hard cap on transactions per block.
-pub const BLOCK_MAX_TX_COUNT: usize = 500;
+pub const BLOCK_MAX_TX_COUNT: usize = 10_000;
 
 /// Gateway faucet pseudo-address (matches PlatariumGatewayGO).
 pub const FAUCET_ADDRESS: &str = "faucet";
