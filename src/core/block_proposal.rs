@@ -320,7 +320,7 @@ pub fn select_block_txs(state: &State, mempool: &[MempoolSnapshotEntry]) -> Sele
         }
         let fee = entry.tx.fee_uplp_u64();
         if gas_used.saturating_add(fee) > BLOCK_GAS_CAP_UPLP {
-            break;
+            continue;
         }
         hashes.push(entry.tx.hash.clone());
         gas_used += fee;
@@ -335,13 +335,6 @@ pub fn select_block_txs(state: &State, mempool: &[MempoolSnapshotEntry]) -> Sele
         gas_used,
         gas_cap: BLOCK_GAS_CAP_UPLP,
     }
-}
-
-fn pending_count_from(mempool: &[MempoolSnapshotEntry], from: &str) -> u64 {
-    mempool
-        .iter()
-        .filter(|e| e.tx.from == from)
-        .count() as u64
 }
 
 /// Next nonce packing will consume for `from` (chain head, then contiguous mempool).
