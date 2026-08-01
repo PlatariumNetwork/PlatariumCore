@@ -320,6 +320,20 @@ enum Commands {
         mnemonic: String,
         #[arg(short, long)]
         alphanumeric: String,
+        #[arg(long)]
+        tx_kind: Option<String>,
+        #[arg(long)]
+        escrow_id: Option<String>,
+        #[arg(long)]
+        purpose: Option<String>,
+        #[arg(long)]
+        expires_at: Option<u64>,
+        #[arg(long)]
+        settle_outcome_key: Option<String>,
+        #[arg(long)]
+        settle_payee: Option<String>,
+        #[arg(long)]
+        settle_node: Option<String>,
     },
 }
 
@@ -421,7 +435,32 @@ fn main() {
             writes,
             mnemonic,
             alphanumeric,
-        } => handle_sign_transaction(from, to, asset, amount, fee_uplp, nonce, reads, writes, mnemonic, alphanumeric),
+            tx_kind,
+            escrow_id,
+            purpose,
+            expires_at,
+            settle_outcome_key,
+            settle_payee,
+            settle_node,
+        } => handle_sign_transaction(
+            from,
+            to,
+            asset,
+            amount,
+            fee_uplp,
+            nonce,
+            reads,
+            writes,
+            mnemonic,
+            alphanumeric,
+            tx_kind,
+            escrow_id,
+            purpose,
+            expires_at,
+            settle_outcome_key,
+            settle_payee,
+            settle_node,
+        ),
         Commands::Serve { listen } => handle_serve(listen),
     };
 
@@ -835,73 +874,49 @@ fn handle_sign_transaction(
     writes: String,
     mnemonic: String,
     alphanumeric: String,
+    tx_kind: Option<String>,
+    escrow_id: Option<String>,
+    purpose: Option<String>,
+    expires_at: Option<u64>,
+    settle_outcome_key: Option<String>,
+    settle_payee: Option<String>,
+    settle_node: Option<String>,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    use std::collections::HashSet;
-    if !validate_mnemonic(&mnemonic) {
-        return Err("Invalid mnemonic phrase".into());
-    }
-    let reads_vec: Vec<String> = serde_json::from_str(&reads).map_err(|e| format!("invalid reads JSON: {}", e))?;
-    let writes_vec: Vec<String> = serde_json::from_str(&writes).map_err(|e| format!("invalid writes JSON: {}", e))?;
-    let reads_set: HashSet<String> = reads_vec.into_iter().collect();
-    let writes_set: HashSet<String> = writes_vec.into_iter().collect();
-    let asset_enum = if asset == "PLP" {
-        Asset::PLP
-    } else if asset.starts_with("Token:") {
-        Asset::Token(asset["Token:".len()..].to_string())
-    } else {
-        Asset::Token(asset.clone())
-    };
-    let canonical_asset = asset_enum.as_canonical();
-    let mut reads_sorted: Vec<String> = reads_set.iter().cloned().collect();
-    reads_sorted.sort();
-    let mut writes_sorted: Vec<String> = writes_set.iter().cloned().collect();
-    writes_sorted.sort();
-    #[derive(serde::Serialize)]
-    struct TxHashData {
-        from: String,
-        to: String,
-        asset: String,
-        amount: u128,
-        fee_uplp: u128,
-        nonce: u64,
-        reads: Vec<String>,
-        writes: Vec<String>,
-    }
-    let amount_u128 = amount as u128;
-    let fee_uplp_u128 = fee_uplp as u128;
-    let message = TxHashData {
-        from: from.clone(),
-        to: to.clone(),
-        asset: canonical_asset,
-        amount: amount_u128,
-        fee_uplp: fee_uplp_u128,
-        nonce,
-        reads: reads_sorted,
-        writes: writes_sorted,
-    };
-    let sig_result = sign_with_both_keys(&message, &mnemonic, &alphanumeric)?;
-    let sig_main = normalize_signature_hex(&sig_result.signatures[0].signature_compact);
-    let sig_derived = normalize_signature_hex(&sig_result.signatures[1].signature_compact);
-    let pub_main = sig_result.signatures[0].pub_key.clone();
-    let pub_derived = sig_result.signatures[1].pub_key.clone();
-    // Output Gateway-compatible JSON (asset as string "PLP" or "Token:X")
-    let reads_out: Vec<String> = reads_set.iter().cloned().collect();
-    let writes_out: Vec<String> = writes_set.iter().cloned().collect();
-    let out = serde_json::json!({
-        "hash": sig_result.hash,
+    // Delegate to RPC dispatch so CLI and RPC share escrow-aware hashing.
+    let mut params = serde_json::json!({
         "from": from,
         "to": to,
-        "asset": asset_enum.as_canonical(),
-        "amount": amount_u128,
-        "fee_uplp": fee_uplp_u128,
+        "asset": asset,
+        "amount": amount,
+        "fee_uplp": fee_uplp,
         "nonce": nonce,
-        "reads": reads_out,
-        "writes": writes_out,
-        "sig_main": sig_main,
-        "sig_derived": sig_derived,
-        "pub_main": pub_main,
-        "pub_derived": pub_derived,
+        "reads": reads,
+        "writes": writes,
+        "mnemonic": mnemonic,
+        "alphanumeric": alphanumeric,
     });
-    println!("{}", serde_json::to_string(&out)?);
+    if let Some(v) = tx_kind {
+        params["tx_kind"] = serde_json::json!(v);
+    }
+    if let Some(v) = escrow_id {
+        params["escrow_id"] = serde_json::json!(v);
+    }
+    if let Some(v) = purpose {
+        params["purpose"] = serde_json::json!(v);
+    }
+    if let Some(v) = expires_at {
+        params["expires_at"] = serde_json::json!(v);
+    }
+    if let Some(v) = settle_outcome_key {
+        params["settle_outcome_key"] = serde_json::json!(v);
+    }
+    if let Some(v) = settle_payee {
+        params["settle_payee"] = serde_json::json!(v);
+    }
+    if let Some(v) = settle_node {
+        params["settle_node"] = serde_json::json!(v);
+    }
+    let out = crate::core::core_rpc::dispatch_rpc("sign_transaction", &params)?;
+    println!("{}", out);
     Ok(())
 }

@@ -22,6 +22,12 @@ pub struct StateFileData {
     pub asset_balances: Vec<(String, String, String)>,
     pub uplp_balances: Vec<(String, String)>,
     pub nonces: Vec<(String, u64)>,
+    /// Opaque contact escrows: (request_id_hash, locker, amount_uplp string, status u8)
+    #[serde(default)]
+    pub contact_escrows: Vec<(String, String, String, u8)>,
+    /// Full generic escrow records (JSON objects).
+    #[serde(default)]
+    pub escrows_json: Vec<String>,
 }
 
 impl StateFileData {
@@ -31,6 +37,8 @@ impl StateFileData {
             asset_balances: Vec::new(),
             uplp_balances: Vec::new(),
             nonces: Vec::new(),
+            contact_escrows: Vec::new(),
+            escrows_json: Vec::new(),
         }
     }
 
@@ -57,11 +65,31 @@ impl StateFileData {
             .collect();
         nonces.sort_by(|a, b| a.0.cmp(&b.0));
 
+        let mut escrows: Vec<_> = snap.contact_escrows_arc().values().cloned().collect();
+        escrows.sort_by(|a, b| a.escrow_id.cmp(&b.escrow_id));
+        let escrows_json: Vec<String> = escrows
+            .iter()
+            .filter_map(|e| serde_json::to_string(e).ok())
+            .collect();
+        let contact_escrows: Vec<(String, String, String, u8)> = escrows
+            .iter()
+            .map(|e| {
+                (
+                    e.escrow_id.clone(),
+                    e.creator.clone(),
+                    e.amount.to_string(),
+                    e.status as u8,
+                )
+            })
+            .collect();
+
         Self {
             version: STATE_FILE_VERSION,
             asset_balances,
             uplp_balances,
             nonces,
+            contact_escrows,
+            escrows_json,
         }
     }
 
@@ -94,6 +122,30 @@ impl StateFileData {
         }
         for (addr, nonce) in self.nonces {
             state.set_nonce(&addr, nonce);
+        }
+        if !self.escrows_json.is_empty() {
+            for js in self.escrows_json {
+                let e: crate::modules::escrow::Escrow = serde_json::from_str(&js).map_err(|e| {
+                    PlatariumError::State(format!("invalid escrow json: {}", e))
+                })?;
+                state.restore_escrow(e);
+            }
+        } else {
+            for (rid, locker, amt_str, status_u8) in self.contact_escrows {
+                let amount_uplp: u128 = amt_str.parse().map_err(|e| {
+                    PlatariumError::State(format!("invalid escrow amount for {}: {}", rid, e))
+                })?;
+                let status = crate::modules::escrow::EscrowStatus::from_u8(status_u8)
+                    .unwrap_or(crate::modules::escrow::EscrowStatus::Locked);
+                state.restore_contact_escrow(
+                    &rid,
+                    crate::core::contact_escrow::ContactEscrowEntry {
+                        locker,
+                        amount_uplp,
+                        status,
+                    },
+                );
+            }
         }
         Ok(state)
     }

@@ -9,6 +9,7 @@
 //! - No external sources of non-determinism (time, RNG, etc.) are used in the core path.
 
 pub mod asset;
+pub mod contact_escrow;
 pub mod transaction;
 pub mod state;
 pub mod mempool;
@@ -25,8 +26,11 @@ pub mod state_file;
 pub mod consensus_params;
 pub mod block_proposal;
 pub mod block_proposal_cli;
+pub mod block_cycle;
 pub mod consensus_cli;
 pub mod core_rpc;
+pub mod kernel;
+pub mod dag;
 
 use crate::error::{PlatariumError, Result};
 use crate::core::transaction::Transaction;

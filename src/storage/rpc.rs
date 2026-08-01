@@ -6,68 +6,63 @@ use crate::storage::query::{
     get_account, get_block, get_head, get_receipt, get_state_root, get_tx, head_meta_json,
     list_tx_hashes_for_address,
 };
-use crate::storage::rocks::RocksStore;
+use crate::storage::cache::open_cached;
 use crate::storage::snapshot::{bootstrap_from_snapshot, get_snapshot, list_snapshots};
-use std::path::Path;
-
-fn open(path: &str) -> Result<RocksStore> {
-    RocksStore::open(Path::new(path))
-}
 
 pub fn rocks_get_head_json(db_path: &str) -> Result<String> {
-    let store = open(db_path)?;
-    head_meta_json(&store)
+    let store = open_cached(db_path)?;
+    head_meta_json(store.as_ref())
 }
 
 pub fn rocks_get_tx_json(db_path: &str, tx_hash: &str) -> Result<String> {
-    let store = open(db_path)?;
-    match get_tx(&store, tx_hash)? {
+    let store = open_cached(db_path)?;
+    match get_tx(store.as_ref(), tx_hash)? {
         Some(tx) => Ok(serde_json::json!({"found": true, "tx": serde_json::from_str::<serde_json::Value>(&tx).unwrap_or(serde_json::Value::String(tx))}).to_string()),
         None => Ok(serde_json::json!({"found": false}).to_string()),
     }
 }
 
 pub fn rocks_get_block_json(db_path: &str, height: u64) -> Result<String> {
-    let store = open(db_path)?;
-    match get_block(&store, height)? {
+    let store = open_cached(db_path)?;
+    match get_block(store.as_ref(), height)? {
         Some(b) => Ok(serde_json::to_string(&serde_json::json!({"found": true, "block": b})).unwrap()),
         None => Ok(serde_json::json!({"found": false}).to_string()),
     }
 }
 
 pub fn rocks_get_account_json(db_path: &str, address: &str) -> Result<String> {
-    let store = open(db_path)?;
-    match get_account(&store, address)? {
+    let store = open_cached(db_path)?;
+    match get_account(store.as_ref(), address)? {
         Some(a) => Ok(serde_json::to_string(&serde_json::json!({"found": true, "account": a})).unwrap()),
         None => Ok(serde_json::json!({"found": false}).to_string()),
     }
 }
 
 pub fn rocks_get_receipt_json(db_path: &str, tx_hash: &str) -> Result<String> {
-    let store = open(db_path)?;
-    match get_receipt(&store, tx_hash)? {
+    let store = open_cached(db_path)?;
+    match get_receipt(store.as_ref(), tx_hash)? {
         Some(r) => Ok(serde_json::to_string(&serde_json::json!({"found": true, "receipt": r})).unwrap()),
         None => Ok(serde_json::json!({"found": false}).to_string()),
     }
 }
 
 pub fn rocks_list_address_txs_json(db_path: &str, address: &str) -> Result<String> {
-    let store = open(db_path)?;
-    let hashes = list_tx_hashes_for_address(&store, address)?;
+    let store = open_cached(db_path)?;
+    let hashes = list_tx_hashes_for_address(store.as_ref(), address)?;
     Ok(serde_json::json!({"address": address, "tx_hashes": hashes}).to_string())
 }
 
 pub fn rocks_commit_block_json(db_path: &str, commit_json: &str) -> Result<String> {
-    let store = open(db_path)?;
+    let store = open_cached(db_path)?;
     let commit: BlockCommit = serde_json::from_str(commit_json)
         .map_err(|e| PlatariumError::State(format!("invalid BlockCommit JSON: {}", e)))?;
-    commit_block(&store, &commit)?;
+    commit_block(store.as_ref(), &commit)?;
     Ok(serde_json::json!({"ok": true, "height": commit.block.height}).to_string())
 }
 
 pub fn rocks_list_snapshots_json(db_path: &str) -> Result<String> {
-    let store = open(db_path)?;
-    let snaps = list_snapshots(&store)?;
+    let store = open_cached(db_path)?;
+    let snaps = list_snapshots(store.as_ref())?;
     // Omit full account dumps in list for size.
     let thin: Vec<_> = snaps
         .iter()
@@ -83,24 +78,24 @@ pub fn rocks_list_snapshots_json(db_path: &str) -> Result<String> {
 }
 
 pub fn rocks_get_snapshot_json(db_path: &str, height: u64) -> Result<String> {
-    let store = open(db_path)?;
-    match get_snapshot(&store, height)? {
+    let store = open_cached(db_path)?;
+    match get_snapshot(store.as_ref(), height)? {
         Some(s) => Ok(serde_json::to_string(&serde_json::json!({"found": true, "snapshot": s})).unwrap()),
         None => Ok(serde_json::json!({"found": false}).to_string()),
     }
 }
 
 pub fn rocks_bootstrap_snapshot_json(db_path: &str, snapshot_json: &str) -> Result<String> {
-    let store = open(db_path)?;
+    let store = open_cached(db_path)?;
     let meta = serde_json::from_str(snapshot_json)
         .map_err(|e| PlatariumError::State(format!("invalid snapshot JSON: {}", e)))?;
-    bootstrap_from_snapshot(&store, &meta)?;
-    Ok(serde_json::json!({"ok": true, "head": get_head(&store)?}).to_string())
+    bootstrap_from_snapshot(store.as_ref(), &meta)?;
+    Ok(serde_json::json!({"ok": true, "head": get_head(store.as_ref())?}).to_string())
 }
 
 pub fn rocks_get_state_root_json(db_path: &str, height: u64) -> Result<String> {
-    let store = open(db_path)?;
-    match get_state_root(&store, height)? {
+    let store = open_cached(db_path)?;
+    match get_state_root(store.as_ref(), height)? {
         Some(r) => Ok(serde_json::json!({"found": true, "state_root": r}).to_string()),
         None => Ok(serde_json::json!({"found": false}).to_string()),
     }
@@ -161,7 +156,7 @@ pub fn migrate_json_to_rocks(
     chain_json: &str,
     state_accounts_json: Option<&str>,
 ) -> Result<String> {
-    let store = open(db_path)?;
+    let store = open_cached(db_path)?;
     let chain: serde_json::Value = serde_json::from_str(chain_json)
         .map_err(|e| PlatariumError::State(format!("invalid chain JSON: {}", e)))?;
 
@@ -278,14 +273,14 @@ pub fn migrate_json_to_rocks(
                 &crate::storage::schema::encode_u64(height.saturating_sub(1)),
             )?;
         }
-        commit_block(&store, &commit)?;
+        commit_block(store.as_ref(), &commit)?;
         imported += 1;
     }
 
     Ok(serde_json::json!({
         "ok": true,
         "blocks_imported": imported,
-        "head": get_head(&store)?,
+        "head": get_head(store.as_ref())?,
     })
     .to_string())
 }

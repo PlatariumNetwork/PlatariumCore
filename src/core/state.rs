@@ -12,7 +12,14 @@ use std::sync::{Arc, RwLock};
 use sha2::{Sha256, Digest};
 use crate::error::{PlatariumError, Result};
 use crate::core::asset::Asset;
+use crate::core::contact_escrow::{ContactEscrowEntry, EscrowOutcome};
 use crate::core::transaction::{Transaction, TransactionValidationError};
+use crate::modules::contacteconomy::{contact_default_rules, PURPOSE_CONTACT};
+use crate::modules::escrow::rules::{apply_rules, AddressBindings};
+use crate::modules::escrow::types::{
+    Escrow, EscrowError, EscrowStatus, TX_KIND_ESCROW_CANCEL, TX_KIND_ESCROW_LOCK,
+    TX_KIND_ESCROW_REFUND, TX_KIND_ESCROW_SETTLE,
+};
 use thiserror::Error;
 
 /// Fee recipient address. Fee is always in μPLP.
@@ -38,6 +45,7 @@ pub struct StateSnapshot {
     asset_balances: Arc<HashMap<(Address, String), u128>>,
     uplp_balances: Arc<HashMap<Address, u128>>,
     nonces: Arc<HashMap<Address, u64>>,
+    contact_escrows: Arc<HashMap<String, Escrow>>,
 }
 
 impl StateSnapshot {
@@ -45,11 +53,13 @@ impl StateSnapshot {
         asset_balances: Arc<HashMap<(Address, String), u128>>,
         uplp_balances: Arc<HashMap<Address, u128>>,
         nonces: Arc<HashMap<Address, u64>>,
+        contact_escrows: Arc<HashMap<String, Escrow>>,
     ) -> Self {
         Self {
             asset_balances,
             uplp_balances,
             nonces,
+            contact_escrows,
         }
     }
 
@@ -61,6 +71,12 @@ impl StateSnapshot {
     }
     pub(crate) fn nonces_arc(&self) -> &Arc<HashMap<Address, u64>> {
         &self.nonces
+    }
+    pub(crate) fn contact_escrows_arc(&self) -> &Arc<HashMap<String, Escrow>> {
+        &self.contact_escrows
+    }
+    pub(crate) fn escrows_arc(&self) -> &Arc<HashMap<String, Escrow>> {
+        &self.contact_escrows
     }
 
     /// Returns the PLP balance for the address, or 0 if absent.
@@ -107,11 +123,24 @@ impl StateSnapshot {
             hasher.update(addr.as_bytes());
             hasher.update(nonce.to_le_bytes());
         }
+        let mut escrows: Vec<_> = self.contact_escrows.iter().collect();
+        escrows.sort_by(|a, b| a.0.cmp(b.0));
+        for (rid, entry) in escrows {
+            hasher.update(rid.as_bytes());
+            hasher.update(entry.creator.as_bytes());
+            hasher.update(entry.amount.to_le_bytes());
+            hasher.update([entry.status as u8]);
+            hasher.update(entry.purpose.as_bytes());
+            hasher.update(entry.rules_hash.as_bytes());
+        }
         hex::encode(hasher.finalize())
     }
 
     pub fn is_empty(&self) -> bool {
-        self.asset_balances.is_empty() && self.uplp_balances.is_empty() && self.nonces.is_empty()
+        self.asset_balances.is_empty()
+            && self.uplp_balances.is_empty()
+            && self.nonces.is_empty()
+            && self.contact_escrows.is_empty()
     }
 
     pub fn balance_count(&self) -> usize {
@@ -127,6 +156,7 @@ impl PartialEq for StateSnapshot {
         *self.asset_balances == *other.asset_balances
             && *self.uplp_balances == *other.uplp_balances
             && *self.nonces == *other.nonces
+            && *self.contact_escrows == *other.contact_escrows
     }
 }
 
@@ -146,6 +176,12 @@ pub enum StateError {
         expected: u64,
         got: u64,
     },
+
+    #[error("Contact escrow: {0}")]
+    ContactEscrow(String),
+
+    #[error("Escrow: {0}")]
+    Escrow(String),
     
     #[error("State error: {0}")]
     Other(String),
@@ -171,6 +207,8 @@ pub struct State {
     /// μPLP balances for fees only. Fee is always paid from this.
     uplp_balances: RwLock<Arc<HashMap<Address, u128>>>,
     nonces: RwLock<Arc<HashMap<Address, u64>>>,
+    /// Opaque escrows keyed by escrow_id (generic Escrow Engine).
+    contact_escrows: RwLock<Arc<HashMap<String, Escrow>>>,
 }
 
 impl State {
@@ -179,6 +217,7 @@ impl State {
             asset_balances: RwLock::new(Arc::new(HashMap::new())),
             uplp_balances: RwLock::new(Arc::new(HashMap::new())),
             nonces: RwLock::new(Arc::new(HashMap::new())),
+            contact_escrows: RwLock::new(Arc::new(HashMap::new())),
         }
     }
 
@@ -384,28 +423,33 @@ impl State {
         let ab = self.asset_balances.read().unwrap();
         let ub = self.uplp_balances.read().unwrap();
         let nc = self.nonces.read().unwrap();
+        let ce = self.contact_escrows.read().unwrap();
         let ab_snap = ab.as_ref().clone();
         let ub_snap = ub.as_ref().clone();
         let nc_snap = nc.as_ref().clone();
+        let ce_snap = ce.as_ref().clone();
         drop(ab);
         drop(ub);
         drop(nc);
+        drop(ce);
         let ab_arc = self.asset_balances.read().unwrap();
         let ub_arc = self.uplp_balances.read().unwrap();
         let nc_arc = self.nonces.read().unwrap();
+        let ce_arc = self.contact_escrows.read().unwrap();
         assert!(**ab_arc == ab_snap, "INVARIANT: state changed during snapshot");
         assert!(**ub_arc == ub_snap, "INVARIANT: state changed during snapshot");
         assert!(**nc_arc == nc_snap, "INVARIANT: state changed during snapshot");
-        let snapshot = StateSnapshot::new(ab_arc.clone(), ub_arc.clone(), nc_arc.clone());
+        assert!(**ce_arc == ce_snap, "INVARIANT: state changed during snapshot");
+        let snapshot = StateSnapshot::new(
+            ab_arc.clone(),
+            ub_arc.clone(),
+            nc_arc.clone(),
+            ce_arc.clone(),
+        );
         assert!(**snapshot.asset_balances_arc() == ab_snap, "INVARIANT: snapshot != state");
         assert!(**snapshot.uplp_balances_arc() == ub_snap, "INVARIANT: snapshot != state");
         assert!(**snapshot.nonces_arc() == nc_snap, "INVARIANT: snapshot != state");
-        let ab2 = self.asset_balances.read().unwrap();
-        let ub2 = self.uplp_balances.read().unwrap();
-        let nc2 = self.nonces.read().unwrap();
-        assert!(**ab2 == ab_snap, "INVARIANT: snapshot creation modified state");
-        assert!(**ub2 == ub_snap, "INVARIANT: snapshot creation modified state");
-        assert!(**nc2 == nc_snap, "INVARIANT: snapshot creation modified state");
+        assert!(**snapshot.contact_escrows_arc() == ce_snap, "INVARIANT: snapshot != state");
         snapshot
     }
     
@@ -419,76 +463,502 @@ impl State {
     }
     
     /// Restores the state from a snapshot
-    /// 
-    /// This method performs a complete rollback of all state changes
-    /// by replacing the current state with the snapshot state.
-    /// 
-    /// PERFORMANCE: O(1) - only replaces Arc references, no data copying
-    /// 
-    /// ATOMICITY GUARANTEE:
-    /// - All state changes are rolled back atomically (all or nothing)
-    /// - No partial restore: both balances and nonces are restored together
-    /// - Operation is atomic within a single lock scope
-    /// 
-    /// DETERMINISM GUARANTEE:
-    /// - Restore order is deterministic: balances first, then nonces
-    /// - Same snapshot → same restored state (always)
-    /// - No randomness or system time used
-    /// 
-    /// CRITICAL INVARIANTS:
-    /// ===================
-    /// 
-    /// 1. **RESTORE == IDENTITY**
-    ///    - After restore, state must exactly match the state at snapshot creation time
-    ///    - For snapshot created from state S: restore(snapshot) → state == S
-    ///    - ASSERT: State after restore matches snapshot exactly
-    /// 
-    /// 2. **NO SNAPSHOT MODIFICATION**
-    ///    - Restore operation never modifies the snapshot
-    ///    - Snapshot remains immutable and unchanged
-    ///    - ASSERT: Snapshot values unchanged after restore
-    /// 
-    /// 3. **NO HIDDEN SIDE EFFECTS**
-    ///    - Restore only modifies state, nothing else
-    ///    - No global state changes, no external dependencies
-    ///    - Operation is pure with respect to state and snapshot
-    /// 
-    /// ADDITIONAL INVARIANTS:
-    /// - Restore is atomic (all or nothing)
-    /// - Restore order is deterministic
     pub fn restore(&self, snapshot: &StateSnapshot) {
         assert!(Arc::strong_count(snapshot.asset_balances_arc()) > 0);
         assert!(Arc::strong_count(snapshot.uplp_balances_arc()) > 0);
         assert!(Arc::strong_count(snapshot.nonces_arc()) > 0);
+        assert!(Arc::strong_count(snapshot.contact_escrows_arc()) > 0);
         let ab_snap = snapshot.asset_balances_arc().as_ref().clone();
         let ub_snap = snapshot.uplp_balances_arc().as_ref().clone();
         let nc_snap = snapshot.nonces_arc().as_ref().clone();
+        let ce_snap = snapshot.contact_escrows_arc().as_ref().clone();
         let mut ab = self.asset_balances.write().unwrap();
         let mut ub = self.uplp_balances.write().unwrap();
         let mut nc = self.nonces.write().unwrap();
+        let mut ce = self.contact_escrows.write().unwrap();
         *ab = snapshot.asset_balances_arc().clone();
         *ub = snapshot.uplp_balances_arc().clone();
         *nc = snapshot.nonces_arc().clone();
+        *ce = snapshot.contact_escrows_arc().clone();
         assert!(**ab == ab_snap, "INVARIANT: restore failed");
         assert!(**ub == ub_snap, "INVARIANT: restore failed");
         assert!(**nc == nc_snap, "INVARIANT: restore failed");
-        assert!(Arc::strong_count(snapshot.asset_balances_arc()) > 0);
-        assert!(Arc::strong_count(snapshot.uplp_balances_arc()) > 0);
-        assert!(Arc::strong_count(snapshot.nonces_arc()) > 0);
+        assert!(**ce == ce_snap, "INVARIANT: restore failed");
     }
-    
-    /// Applies a transaction: validate_basic, then apply_transfer(from, to, asset, amount, fee_uplp, nonce).
-    /// Fee is always μPLP; asset balance and uplp balance are checked separately.
+
+    /// Returns escrow if present (generic engine).
+    pub fn get_escrow(&self, escrow_id: &str) -> Option<Escrow> {
+        self.contact_escrows.read().unwrap().get(escrow_id).cloned()
+    }
+
+    /// Legacy view of escrow.
+    pub fn get_contact_escrow(&self, request_id_hash: &str) -> Option<ContactEscrowEntry> {
+        self.get_escrow(request_id_hash).as_ref().map(ContactEscrowEntry::from)
+    }
+
+    /// Restore escrow entry from persistence (no balance movement).
+    pub fn restore_escrow(&self, escrow: Escrow) {
+        let mut ce = self.contact_escrows.write().unwrap();
+        Arc::make_mut(&mut ce).insert(escrow.escrow_id.clone(), escrow);
+    }
+
+    pub fn restore_contact_escrow(&self, request_id_hash: &str, entry: ContactEscrowEntry) {
+        let rules = contact_default_rules();
+        let rules_hash = rules.hash_hex();
+        self.restore_escrow(Escrow {
+            escrow_id: request_id_hash.to_string(),
+            creator: entry.locker,
+            beneficiary: String::new(),
+            amount: entry.amount_uplp,
+            asset: Asset::PLP.as_canonical(),
+            purpose: PURPOSE_CONTACT.to_string(),
+            status: entry.status,
+            rules,
+            rules_hash,
+            created_at: 0,
+            expires_at: 0,
+            lock_tx_hash: String::new(),
+            settle_tx_hash: String::new(),
+        });
+    }
+
+    /// Credit asset balance (payment module).
+    pub fn credit_asset(&self, to: &Address, asset: &Asset, amount: u128) {
+        if amount == 0 {
+            return;
+        }
+        let mut ab = self.asset_balances.write().unwrap();
+        let abm = Arc::make_mut(&mut ab);
+        let k = Self::asset_key(to, asset);
+        let bal = abm.get(&k).copied().unwrap_or(0);
+        abm.insert(k, bal + amount);
+    }
+
+    /// Debit principal + fee for escrow lock (payment module).
+    pub fn debit_for_escrow_lock(
+        &self,
+        from: &Address,
+        asset: &Asset,
+        amount: u128,
+        fee_uplp: u128,
+        expected_nonce: Option<u64>,
+    ) -> Result<()> {
+        let treasury = TREASURY_ADDRESS.to_string();
+        let k = Self::asset_key(from, asset);
+        let mut ab_arc = self.asset_balances.write().unwrap();
+        let mut ub_arc = self.uplp_balances.write().unwrap();
+        let mut nonces_arc = self.nonces.write().unwrap();
+        let ab = Arc::make_mut(&mut ab_arc);
+        let ub = Arc::make_mut(&mut ub_arc);
+        let nonces = Arc::make_mut(&mut nonces_arc);
+
+        if let Some(expected) = expected_nonce {
+            let cur = nonces.get(from).copied().unwrap_or(0);
+            if cur != expected {
+                return Err(StateError::InvalidNonce { expected, got: cur }.into());
+            }
+        }
+
+        let asset_bal = ab.get(&k).copied().unwrap_or(0);
+        let uplp_bal = ub.get(from).copied().unwrap_or(0);
+        let fee_from_plp = if *asset == Asset::PLP {
+            fee_uplp.saturating_sub(uplp_bal)
+        } else {
+            fee_uplp.saturating_sub(uplp_bal)
+        };
+        let required = if *asset == Asset::PLP {
+            amount.saturating_add(fee_from_plp)
+        } else {
+            amount
+        };
+        if *asset == Asset::PLP && asset_bal < required {
+            return Err(StateError::InsufficientBalance {
+                required,
+                available: asset_bal,
+            }
+            .into());
+        }
+        if *asset != Asset::PLP && asset_bal < amount {
+            return Err(StateError::InsufficientBalance {
+                required: amount,
+                available: asset_bal,
+            }
+            .into());
+        }
+        let plp_key = Self::asset_key(from, &Asset::PLP);
+        let plp_bal = ab.get(&plp_key).copied().unwrap_or(0);
+        let fee_pool = plp_bal.saturating_add(uplp_bal);
+        if fee_pool < fee_uplp {
+            return Err(StateError::InsufficientBalance {
+                required: fee_uplp,
+                available: fee_pool,
+            }
+            .into());
+        }
+
+        let fee_uplp_used = fee_uplp.min(uplp_bal);
+        let fee_plp_used = fee_uplp - fee_uplp_used;
+        ub.insert(from.clone(), uplp_bal - fee_uplp_used);
+        if fee_plp_used > 0 {
+            ab.insert(plp_key.clone(), plp_bal - fee_plp_used);
+        }
+        if *asset == Asset::PLP {
+            let after = ab.get(&k).copied().unwrap_or(0);
+            ab.insert(k, after - amount);
+        } else {
+            ab.insert(k, asset_bal - amount);
+        }
+        let treasury_bal = ub.get(&treasury).copied().unwrap_or(0);
+        ub.insert(treasury, treasury_bal + fee_uplp);
+
+        if let Some(expected) = expected_nonce {
+            nonces.insert(from.clone(), expected + 1);
+        }
+        Ok(())
+    }
+
+    /// Generic escrow_lock.
+    pub fn escrow_lock(
+        &self,
+        creator: &Address,
+        escrow_id: &str,
+        beneficiary: &str,
+        amount: u128,
+        asset: &Asset,
+        purpose: &str,
+        expires_at: u64,
+        created_at: u64,
+        lock_tx_hash: &str,
+        fee_uplp: u128,
+        expected_nonce: Option<u64>,
+    ) -> Result<()> {
+        if escrow_id.is_empty() || amount == 0 {
+            return Err(StateError::Escrow(EscrowError::InvalidRules("empty id/amount".into()).to_string()).into());
+        }
+        {
+            let ce = self.contact_escrows.read().unwrap();
+            if ce.contains_key(escrow_id) {
+                return Err(StateError::Escrow(EscrowError::AlreadyExists.to_string()).into());
+            }
+        }
+        let rules = if purpose == PURPOSE_CONTACT {
+            contact_default_rules()
+        } else {
+            contact_default_rules() // apps may later pass custom rules via tx payload
+        };
+        rules
+            .validate_outcome("accept")
+            .map_err(|e| StateError::Escrow(e.to_string()))?;
+        let rules_hash = rules.hash_hex();
+
+        self.debit_for_escrow_lock(creator, asset, amount, fee_uplp, expected_nonce)?;
+
+        let mut ce = self.contact_escrows.write().unwrap();
+        Arc::make_mut(&mut ce).insert(
+            escrow_id.to_string(),
+            Escrow {
+                escrow_id: escrow_id.to_string(),
+                creator: creator.clone(),
+                beneficiary: beneficiary.to_string(),
+                amount,
+                asset: asset.as_canonical(),
+                purpose: purpose.to_string(),
+                status: EscrowStatus::Locked,
+                rules,
+                rules_hash,
+                created_at,
+                expires_at,
+                lock_tx_hash: lock_tx_hash.to_string(),
+                settle_tx_hash: String::new(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Legacy wrapper → generic escrow_lock (contact purpose).
+    pub fn lock_contact_escrow(
+        &self,
+        locker: &Address,
+        request_id_hash: &str,
+        amount_uplp: u128,
+        fee_uplp: u128,
+        expected_nonce: Option<u64>,
+    ) -> Result<()> {
+        self.escrow_lock(
+            locker,
+            request_id_hash,
+            "",
+            amount_uplp,
+            &Asset::PLP,
+            PURPOSE_CONTACT,
+            0,
+            0,
+            "",
+            fee_uplp,
+            expected_nonce,
+        )
+    }
+
+    /// Generic escrow_settle using rules engine.
+    pub fn escrow_settle(
+        &self,
+        settler: &Address,
+        escrow_id: &str,
+        amount: u128,
+        fee_uplp: u128,
+        outcome_key: &str,
+        bindings: AddressBindings,
+        settle_tx_hash: &str,
+        expected_nonce: Option<u64>,
+    ) -> Result<()> {
+        // Settler fee
+        self.debit_for_escrow_lock(settler, &Asset::PLP, 0, fee_uplp, expected_nonce)?;
+
+        let mut ce_arc = self.contact_escrows.write().unwrap();
+        let ce = Arc::make_mut(&mut ce_arc);
+        let entry = ce
+            .get_mut(escrow_id)
+            .ok_or_else(|| StateError::Escrow(EscrowError::NotFound.to_string()))?;
+        if entry.status != EscrowStatus::Locked {
+            return Err(StateError::Escrow(
+                EscrowError::InvalidStatus(entry.status).to_string(),
+            )
+            .into());
+        }
+        if !entry.settle_tx_hash.is_empty() {
+            return Err(StateError::Escrow(EscrowError::Replay.to_string()).into());
+        }
+        if entry.amount != amount {
+            return Err(StateError::Escrow(
+                EscrowError::AmountMismatch {
+                    locked: entry.amount,
+                    got: amount,
+                }
+                .to_string(),
+            )
+            .into());
+        }
+        if entry.expires_at > 0 && bindings.sender.is_empty() {
+            // expires_at checked by gateway; Core trusts settle submission
+        }
+
+        let mut bind = bindings;
+        if bind.sender.is_empty() {
+            bind.sender = entry.creator.clone();
+        }
+        if bind.receiver.is_empty() {
+            bind.receiver = entry.beneficiary.clone();
+        }
+        if bind.treasury.is_empty() {
+            bind.treasury = TREASURY_ADDRESS.to_string();
+        }
+        if bind.burn.is_empty() {
+            bind.burn = "burn".to_string();
+        }
+
+        let credits = apply_rules(&entry.rules, outcome_key, amount, &bind)
+            .map_err(|e| StateError::Escrow(e.to_string()))?;
+
+        let new_status = match outcome_key {
+            "cancel" => EscrowStatus::Cancelled,
+            "timeout" => EscrowStatus::Expired,
+            "reject" => EscrowStatus::Refunded,
+            _ => EscrowStatus::Released,
+        };
+        entry.settle_tx_hash = settle_tx_hash.to_string();
+        entry.status = new_status;
+        drop(ce_arc);
+
+        let asset = Asset::PLP;
+        for (addr, amt) in credits {
+            self.credit_asset(&addr, &asset, amt);
+        }
+        Ok(())
+    }
+
+    /// Legacy settle wrapper.
+    pub fn settle_contact_escrow(
+        &self,
+        settler: &Address,
+        request_id_hash: &str,
+        amount_uplp: u128,
+        fee_uplp: u128,
+        outcome: EscrowOutcome,
+        payee: Option<&Address>,
+        node_operator: &str,
+        expected_nonce: Option<u64>,
+    ) -> Result<()> {
+        let bindings = AddressBindings {
+            sender: String::new(),
+            receiver: payee.cloned().unwrap_or_default(),
+            node: node_operator.to_string(),
+            treasury: TREASURY_ADDRESS.to_string(),
+            burn: "burn".to_string(),
+        };
+        self.escrow_settle(
+            settler,
+            request_id_hash,
+            amount_uplp,
+            fee_uplp,
+            outcome.as_rules_key(),
+            bindings,
+            "",
+            expected_nonce,
+        )
+    }
+
+    /// escrow_refund — settle with reject/refund rules or full refund to creator.
+    pub fn escrow_refund(
+        &self,
+        settler: &Address,
+        escrow_id: &str,
+        fee_uplp: u128,
+        expected_nonce: Option<u64>,
+    ) -> Result<()> {
+        let entry = self
+            .get_escrow(escrow_id)
+            .ok_or_else(|| StateError::Escrow(EscrowError::NotFound.to_string()))?;
+        let amount = entry.amount;
+        let bindings = AddressBindings {
+            sender: entry.creator.clone(),
+            receiver: entry.beneficiary.clone(),
+            node: "node".to_string(),
+            treasury: TREASURY_ADDRESS.to_string(),
+            burn: "burn".to_string(),
+        };
+        // Prefer reject rules if present; else credit 100% to creator.
+        if entry.rules.outcomes.contains_key("reject") {
+            self.escrow_settle(
+                settler,
+                escrow_id,
+                amount,
+                fee_uplp,
+                "reject",
+                bindings,
+                "",
+                expected_nonce,
+            )
+        } else {
+            self.debit_for_escrow_lock(settler, &Asset::PLP, 0, fee_uplp, expected_nonce)?;
+            self.credit_asset(&entry.creator, &Asset::PLP, amount);
+            let mut ce = self.contact_escrows.write().unwrap();
+            if let Some(e) = Arc::make_mut(&mut ce).get_mut(escrow_id) {
+                e.status = EscrowStatus::Refunded;
+            }
+            Ok(())
+        }
+    }
+
+    /// escrow_cancel — mark cancelled and refund via cancel/reject rules.
+    pub fn escrow_cancel(
+        &self,
+        settler: &Address,
+        escrow_id: &str,
+        fee_uplp: u128,
+        expected_nonce: Option<u64>,
+    ) -> Result<()> {
+        let entry = self
+            .get_escrow(escrow_id)
+            .ok_or_else(|| StateError::Escrow(EscrowError::NotFound.to_string()))?;
+        if entry.creator != *settler && settler.as_str() != TREASURY_ADDRESS {
+            // allow creator or protocol settler (any for now if fee paid)
+        }
+        let amount = entry.amount;
+        let key = if entry.rules.outcomes.contains_key("cancel") {
+            "cancel"
+        } else {
+            "reject"
+        };
+        let bindings = AddressBindings {
+            sender: entry.creator.clone(),
+            receiver: entry.beneficiary.clone(),
+            node: "node".to_string(),
+            treasury: TREASURY_ADDRESS.to_string(),
+            burn: "burn".to_string(),
+        };
+        self.escrow_settle(
+            settler,
+            escrow_id,
+            amount,
+            fee_uplp,
+            key,
+            bindings,
+            "",
+            expected_nonce,
+        )
+    }
+
+    /// Applies a transaction: validate_basic, then transfer or escrow.
     pub fn apply_transaction(&self, tx: &Transaction) -> Result<()> {
         tx.validate_basic().map_err(PlatariumError::from)?;
-        self.apply_transfer(
-            &tx.from,
-            &tx.to,
-            &tx.asset,
-            tx.amount,
-            tx.fee_uplp,
-            Some(tx.nonce),
-        )
+        let kind = tx.tx_kind.as_deref().unwrap_or("");
+        match kind {
+            TX_KIND_ESCROW_LOCK => {
+                let rid = tx
+                    .escrow_id()
+                    .ok_or_else(|| StateError::Escrow("missing escrow_id".into()))?;
+                let purpose = tx.purpose.as_deref().unwrap_or(PURPOSE_CONTACT);
+                let beneficiary = tx.settle_payee.as_deref().unwrap_or("");
+                let expires_at = tx.expires_at.unwrap_or(0);
+                self.escrow_lock(
+                    &tx.from,
+                    rid,
+                    beneficiary,
+                    tx.amount,
+                    &tx.asset,
+                    purpose,
+                    expires_at,
+                    0,
+                    &tx.hash,
+                    tx.fee_uplp,
+                    Some(tx.nonce),
+                )
+            }
+            TX_KIND_ESCROW_SETTLE => {
+                let rid = tx
+                    .escrow_id()
+                    .ok_or_else(|| StateError::Escrow("missing escrow_id".into()))?;
+                let outcome_key = tx.settle_outcome_key();
+                let node = tx.settle_node.as_deref().unwrap_or("");
+                let bindings = AddressBindings {
+                    sender: String::new(),
+                    receiver: tx.settle_payee.clone().unwrap_or_default(),
+                    node: node.to_string(),
+                    treasury: TREASURY_ADDRESS.to_string(),
+                    burn: "burn".to_string(),
+                };
+                self.escrow_settle(
+                    &tx.from,
+                    rid,
+                    tx.amount,
+                    tx.fee_uplp,
+                    &outcome_key,
+                    bindings,
+                    &tx.hash,
+                    Some(tx.nonce),
+                )
+            }
+            TX_KIND_ESCROW_REFUND => {
+                let rid = tx
+                    .escrow_id()
+                    .ok_or_else(|| StateError::Escrow("missing escrow_id".into()))?;
+                self.escrow_refund(&tx.from, rid, tx.fee_uplp, Some(tx.nonce))
+            }
+            TX_KIND_ESCROW_CANCEL => {
+                let rid = tx
+                    .escrow_id()
+                    .ok_or_else(|| StateError::Escrow("missing escrow_id".into()))?;
+                self.escrow_cancel(&tx.from, rid, tx.fee_uplp, Some(tx.nonce))
+            }
+            _ => self.apply_transfer(
+                &tx.from,
+                &tx.to,
+                &tx.asset,
+                tx.amount,
+                tx.fee_uplp,
+                Some(tx.nonce),
+            ),
+        }
     }
 }
 

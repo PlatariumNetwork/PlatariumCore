@@ -1,7 +1,11 @@
 //! JSON-RPC 2.0 server for Gateway native Core binding.
 //! Newline-delimited JSON over TCP or Unix domain socket.
+//!
+//! Requests are serialized with a process-wide mutex so state-file and RocksDB
+//! mutations from concurrent connections cannot race.
 
 use crate::core::asset::Asset;
+use crate::core::block_cycle::block_cycle_json;
 use crate::core::block_proposal_cli::{
     block_proposal_status_json, mempool_admit_json, min_fee_from_load_cli, select_block_txs_json,
 };
@@ -27,6 +31,12 @@ use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+
+fn dispatch_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn param_str(params: &Value, key: &str) -> Result<String> {
     params
@@ -89,7 +99,421 @@ fn param_opt_str(params: &Value, key: &str) -> Option<String> {
 /// Dispatch one JSON-RPC method to Core logic. Returns JSON result string.
 pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
     match method {
-        "ping" => Ok(json!({"ok": true, "service": "platarium-core-rpc", "version": "1.0.0"}).to_string()),
+        "ping" => Ok(json!({"ok": true, "service": "platarium-core-rpc", "version": "1.2.0"}).to_string()),
+
+        "block_cycle" => block_cycle_json(params),
+
+        "kernel_execute_batch" => {
+            use crate::core::kernel::{execute_ordered_batch, ExecuteOptions, OrderedBatch};
+            use crate::core::state_file::load_state_file;
+            use crate::core::transaction::Transaction;
+            let path = param_str(params, "state_file")?;
+            let parallel = param_bool(params, "parallel");
+            let batch_val = params
+                .get("batch")
+                .cloned()
+                .ok_or_else(|| PlatariumError::State("missing param batch".into()))?;
+            let batch_id = batch_val
+                .get("batch_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("batch")
+                .to_string();
+            let height = batch_val.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+            let txs_val = batch_val
+                .get("transactions")
+                .cloned()
+                .ok_or_else(|| PlatariumError::State("batch.transactions required".into()))?;
+            let mut transactions = Vec::new();
+            if let Some(arr) = txs_val.as_array() {
+                for item in arr {
+                    let tx = if let Some(s) = item.as_str() {
+                        Transaction::from_gateway_json(s)?
+                    } else {
+                        Transaction::from_gateway_json(&item.to_string())?
+                    };
+                    transactions.push(tx);
+                }
+            } else {
+                return Err(PlatariumError::State(
+                    "batch.transactions must be an array".into(),
+                ));
+            }
+            let batch = OrderedBatch::new(batch_id, height, transactions)?;
+            let state = load_state_file(Path::new(&path))?;
+            let out = execute_ordered_batch(
+                &state,
+                &batch,
+                ExecuteOptions { parallel },
+            )?;
+            Ok(json!({
+                "ok": true,
+                "diff": out.diff,
+                "waves": out.waves,
+            })
+            .to_string())
+        }
+
+        "kernel_commit_diff" => {
+            use crate::core::kernel::{commit_state_diff, StateDiff};
+            use crate::storage::engine::StateFileStorageEngine;
+            let path = param_str(params, "state_file")?;
+            let diff_val = params
+                .get("diff")
+                .cloned()
+                .ok_or_else(|| PlatariumError::State("missing param diff".into()))?;
+            let diff: StateDiff = serde_json::from_value(diff_val)
+                .map_err(|e| PlatariumError::State(format!("invalid StateDiff: {}", e)))?;
+            let mut eng = StateFileStorageEngine::open(Path::new(&path))?;
+            let res = commit_state_diff(&mut eng, &diff)?;
+            Ok(serde_json::to_string(&res).map_err(|e| PlatariumError::State(e.to_string()))?)
+        }
+
+        "dag_reset" => {
+            crate::core::dag::reset_global_dag_store();
+            Ok(json!({"ok": true}).to_string())
+        }
+
+        "dag_insert" => {
+            use crate::core::dag::{global_dag_store, DagVertex};
+            let v = params
+                .get("vertex")
+                .cloned()
+                .ok_or_else(|| PlatariumError::State("missing param vertex".into()))?;
+            let round = v.get("round").and_then(|x| x.as_u64()).unwrap_or(0);
+            let author = v
+                .get("author")
+                .and_then(|x| x.as_str())
+                .unwrap_or("n0")
+                .to_string();
+            let parents: Vec<String> = v
+                .get("parents")
+                .and_then(|x| x.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|p| p.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let tx_digests: Vec<String> = v
+                .get("tx_digests")
+                .and_then(|x| x.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|p| p.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let vertex = DagVertex::new(round, author, parents, tx_digests);
+            let mut store = global_dag_store()
+                .lock()
+                .map_err(|_| PlatariumError::State("dag store lock poisoned".into()))?;
+            let id = store.insert(vertex)?;
+            Ok(json!({"ok": true, "id": id}).to_string())
+        }
+
+        "dag_linearize" => {
+            use crate::core::dag::{global_dag_store, linearize};
+            let anchor = param_str(params, "anchor")?;
+            let store = global_dag_store()
+                .lock()
+                .map_err(|_| PlatariumError::State("dag store lock poisoned".into()))?;
+            let res = linearize(&store, &anchor)?;
+            Ok(json!({
+                "ok": true,
+                "digests": res.digests,
+                "vertex_order": res.vertex_order,
+            })
+            .to_string())
+        }
+
+        "dag_try_commit" => {
+            use crate::core::dag::{global_dag_store, try_commit, CommitteeConfig};
+            let round = params
+                .get("round")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| PlatariumError::State("missing param round".into()))?;
+            let f = params.get("f").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+            let authors: Vec<String> = params
+                .get("committee")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|a| a.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let committee = CommitteeConfig { authors, f };
+            let store = global_dag_store()
+                .lock()
+                .map_err(|_| PlatariumError::State("dag store lock poisoned".into()))?;
+            match try_commit(&store, &committee, round)? {
+                Some(out) => Ok(json!({
+                    "ok": true,
+                    "committed": true,
+                    "anchor": out.anchor,
+                    "digests": out.digests,
+                    "vertex_order": out.vertex_order,
+                    "round": out.round,
+                })
+                .to_string()),
+                None => Ok(json!({"ok": true, "committed": false}).to_string()),
+            }
+        }
+
+        "dag_to_batch" => {
+            use crate::core::dag::dag_to_ordered_batch;
+            use crate::core::transaction::Transaction;
+            use std::collections::HashMap;
+            let batch_id = param_opt_str(params, "batch_id").unwrap_or_else(|| "dag".into());
+            let height = params.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+            let digests: Vec<String> = params
+                .get("digests")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|d| d.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut payloads = HashMap::new();
+            if let Some(arr) = params.get("transactions").and_then(|v| v.as_array()) {
+                for item in arr {
+                    let tx = if let Some(s) = item.as_str() {
+                        Transaction::from_gateway_json(s)?
+                    } else {
+                        Transaction::from_gateway_json(&item.to_string())?
+                    };
+                    payloads.insert(tx.hash.clone(), tx);
+                }
+            }
+            let batch = dag_to_ordered_batch(batch_id, height, &digests, &payloads)?;
+            Ok(json!({"ok": true, "batch": batch}).to_string())
+        }
+
+        "dag_order_digests" => {
+            use crate::core::dag::order_digests;
+            let producer = param_opt_str(params, "producer").unwrap_or_else(|| "n0".into());
+            let digests: Vec<String> = params
+                .get("digests")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|d| d.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let res = order_digests(producer, &digests)?;
+            Ok(json!({
+                "ok": true,
+                "digests": res.digests,
+                "vertex_order": res.vertex_order,
+                "tip": res.tip,
+            })
+            .to_string())
+        }
+
+        "dag_propose" => {
+            use crate::core::dag::{
+                global_dag_store, global_pending_queue, ingest, DagVertex, IngestStatus,
+            };
+            let round = params.get("round").and_then(|v| v.as_u64()).unwrap_or(0);
+            let author = param_opt_str(params, "author").unwrap_or_else(|| "n0".into());
+            let parents: Vec<String> = params
+                .get("parents")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|p| p.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let tx_digests: Vec<String> = params
+                .get("tx_digests")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|p| p.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let vertex = DagVertex::new(round, author, parents, tx_digests);
+            let mut store = global_dag_store()
+                .lock()
+                .map_err(|_| PlatariumError::State("dag store lock poisoned".into()))?;
+            let mut pending = global_pending_queue()
+                .lock()
+                .map_err(|_| PlatariumError::State("dag pending lock poisoned".into()))?;
+            let res = ingest(&mut store, &mut pending, vertex.clone())?;
+            let status = match res.status {
+                IngestStatus::Inserted => "inserted",
+                IngestStatus::Pending => "pending",
+                IngestStatus::Duplicate => "duplicate",
+                IngestStatus::Rejected => "rejected",
+            };
+            Ok(json!({
+                "ok": res.status != IngestStatus::Rejected,
+                "status": status,
+                "vertex": vertex,
+                "missing_parents": res.missing_parents,
+                "flushed": res.flushed,
+                "error": res.error,
+            })
+            .to_string())
+        }
+
+        "dag_ingest" => {
+            use crate::core::dag::{
+                global_dag_store, global_pending_queue, ingest, vertex_from_params, IngestStatus,
+            };
+            let v = params
+                .get("vertex")
+                .cloned()
+                .ok_or_else(|| PlatariumError::State("missing param vertex".into()))?;
+            let id = v.get("id").and_then(|x| x.as_str()).map(|s| s.to_string());
+            let round = v.get("round").and_then(|x| x.as_u64()).unwrap_or(0);
+            let author = v
+                .get("author")
+                .and_then(|x| x.as_str())
+                .unwrap_or("n0")
+                .to_string();
+            let parents: Vec<String> = v
+                .get("parents")
+                .and_then(|x| x.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|p| p.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let tx_digests: Vec<String> = v
+                .get("tx_digests")
+                .and_then(|x| x.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|p| p.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let vertex = vertex_from_params(id, round, author, parents, tx_digests)?;
+            let mut store = global_dag_store()
+                .lock()
+                .map_err(|_| PlatariumError::State("dag store lock poisoned".into()))?;
+            let mut pending = global_pending_queue()
+                .lock()
+                .map_err(|_| PlatariumError::State("dag pending lock poisoned".into()))?;
+            let res = ingest(&mut store, &mut pending, vertex)?;
+            let status = match res.status {
+                IngestStatus::Inserted => "inserted",
+                IngestStatus::Pending => "pending",
+                IngestStatus::Duplicate => "duplicate",
+                IngestStatus::Rejected => "rejected",
+            };
+            Ok(json!({
+                "ok": true,
+                "status": status,
+                "id": res.id,
+                "missing_parents": res.missing_parents,
+                "flushed": res.flushed,
+                "error": res.error,
+            })
+            .to_string())
+        }
+
+        "dag_ensure_genesis" => {
+            use crate::core::dag::{
+                global_dag_store, global_pending_queue, ingest, shared_genesis, IngestStatus,
+            };
+            let vertex = shared_genesis();
+            let mut store = global_dag_store()
+                .lock()
+                .map_err(|_| PlatariumError::State("dag store lock poisoned".into()))?;
+            let mut pending = global_pending_queue()
+                .lock()
+                .map_err(|_| PlatariumError::State("dag pending lock poisoned".into()))?;
+            let res = ingest(&mut store, &mut pending, vertex.clone())?;
+            let status = match res.status {
+                IngestStatus::Inserted => "inserted",
+                IngestStatus::Duplicate => "duplicate",
+                IngestStatus::Pending => "pending",
+                IngestStatus::Rejected => "rejected",
+            };
+            Ok(json!({
+                "ok": res.status != IngestStatus::Rejected,
+                "status": status,
+                "vertex": vertex,
+                "error": res.error,
+            })
+            .to_string())
+        }
+
+        "dag_try_commit_batches" => {
+            use crate::core::dag::{
+                global_dag_store, set_last_commit, shared_genesis, try_commit_batches,
+                CommitteeConfig,
+            };
+            let batch_round = params
+                .get("batch_round")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1);
+            let authors: Vec<String> = params
+                .get("committee")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|a| a.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let committee = if let Some(f) = params.get("f").and_then(|v| v.as_u64()) {
+                let c = CommitteeConfig {
+                    authors,
+                    f: f as usize,
+                };
+                c.validate().map_err(PlatariumError::State)?;
+                c
+            } else {
+                CommitteeConfig::from_authors(authors).map_err(PlatariumError::State)?
+            };
+            let genesis_id = params
+                .get("genesis_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| shared_genesis().id);
+            let store = global_dag_store()
+                .lock()
+                .map_err(|_| PlatariumError::State("dag store lock poisoned".into()))?;
+            match try_commit_batches(&store, &committee, batch_round, &genesis_id)? {
+                Some(out) => {
+                    set_last_commit(out.clone());
+                    Ok(json!({
+                        "ok": true,
+                        "committed": true,
+                        "anchor": out.anchor,
+                        "digests": out.digests,
+                        "vertex_order": out.vertex_order,
+                        "round": out.round,
+                    })
+                    .to_string())
+                }
+                None => Ok(json!({"ok": true, "committed": false}).to_string()),
+            }
+        }
+
+        "dag_last_commit" => {
+            use crate::core::dag::get_last_commit;
+            match get_last_commit() {
+                Some(out) => Ok(json!({
+                    "ok": true,
+                    "committed": true,
+                    "anchor": out.anchor,
+                    "digests": out.digests,
+                    "vertex_order": out.vertex_order,
+                    "round": out.round,
+                })
+                .to_string()),
+                None => Ok(json!({"ok": true, "committed": false}).to_string()),
+            }
+        }
 
         "state_init" => {
             let path = param_str(params, "state_file")?;
@@ -334,6 +758,7 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
         }
 
         "sign_transaction" => {
+            // Optional escrow fields must be included in the signed hash (matches Transaction::compute_hash).
             let from = param_str(params, "from")?;
             let to = param_str(params, "to")?;
             let asset = param_opt_str(params, "asset").unwrap_or_else(|| "PLP".to_string());
@@ -352,6 +777,16 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
                 .to_string();
             let mnemonic = param_str(params, "mnemonic")?;
             let alphanumeric = param_str(params, "alphanumeric")?;
+            let tx_kind = param_opt_str(params, "tx_kind");
+            let escrow_id = param_opt_str(params, "escrow_id")
+                .or_else(|| param_opt_str(params, "request_id_hash"));
+            let purpose = param_opt_str(params, "purpose");
+            let expires_at = params
+                .get("expires_at")
+                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+            let settle_outcome_key = param_opt_str(params, "settle_outcome_key");
+            let settle_payee = param_opt_str(params, "settle_payee");
+            let settle_node = param_opt_str(params, "settle_node");
             if !validate_mnemonic(&mnemonic) {
                 return Err(PlatariumError::State("Invalid mnemonic phrase".into()));
             }
@@ -368,11 +803,38 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
             } else {
                 Asset::Token(asset.clone())
             };
-            let canonical_asset = asset_enum.as_canonical();
             let mut reads_sorted: Vec<String> = reads_set.iter().cloned().collect();
             reads_sorted.sort();
             let mut writes_sorted: Vec<String> = writes_set.iter().cloned().collect();
             writes_sorted.sort();
+            let amount_u128 = amount as u128;
+            let fee_uplp_u128 = fee_uplp as u128;
+            // Build a Transaction so hash/sign match validate_basic / compute_hash.
+            let mut tx = Transaction {
+                hash: String::new(),
+                from: from.clone(),
+                to: to.clone(),
+                asset: asset_enum.clone(),
+                amount: amount_u128,
+                fee_uplp: fee_uplp_u128,
+                nonce,
+                reads: reads_set.clone(),
+                writes: writes_set.clone(),
+                sig_main: String::new(),
+                sig_derived: String::new(),
+                pub_main: None,
+                pub_derived: None,
+                tx_kind: tx_kind.clone(),
+                request_id_hash: escrow_id.clone(),
+                escrow_id: escrow_id.clone(),
+                purpose: purpose.clone(),
+                expires_at,
+                settle_outcome: None,
+                settle_outcome_key: settle_outcome_key.clone(),
+                settle_payee: settle_payee.clone(),
+                settle_node: settle_node.clone(),
+            };
+            // Sign the same struct Transaction::verify_signatures uses (via compute_hash fields).
             #[derive(serde::Serialize)]
             struct TxHashData {
                 from: String,
@@ -383,27 +845,57 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
                 nonce: u64,
                 reads: Vec<String>,
                 writes: Vec<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                tx_kind: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                request_id_hash: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                escrow_id: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                purpose: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                expires_at: Option<u64>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                settle_outcome: Option<u8>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                settle_outcome_key: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                settle_payee: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                settle_node: Option<String>,
             }
-            let amount_u128 = amount as u128;
-            let fee_uplp_u128 = fee_uplp as u128;
             let message = TxHashData {
                 from: from.clone(),
                 to: to.clone(),
-                asset: canonical_asset,
+                asset: asset_enum.as_canonical(),
                 amount: amount_u128,
                 fee_uplp: fee_uplp_u128,
                 nonce,
                 reads: reads_sorted,
                 writes: writes_sorted,
+                tx_kind: tx_kind.clone(),
+                request_id_hash: escrow_id.clone(),
+                escrow_id: escrow_id.clone(),
+                purpose: purpose.clone(),
+                expires_at,
+                settle_outcome: None,
+                settle_outcome_key: settle_outcome_key.clone(),
+                settle_payee: settle_payee.clone(),
+                settle_node: settle_node.clone(),
             };
             let sig_result = sign_with_both_keys(&message, &mnemonic, &alphanumeric)?;
             let sig_main = normalize_signature_hex(&sig_result.signatures[0].signature_compact);
             let sig_derived = normalize_signature_hex(&sig_result.signatures[1].signature_compact);
             let pub_main = sig_result.signatures[0].pub_key.clone();
             let pub_derived = sig_result.signatures[1].pub_key.clone();
+            tx.hash = sig_result.hash.clone();
+            tx.sig_main = sig_main.clone();
+            tx.sig_derived = sig_derived.clone();
+            tx.pub_main = Some(pub_main.clone());
+            tx.pub_derived = Some(pub_derived.clone());
             let reads_out: Vec<String> = reads_set.iter().cloned().collect();
             let writes_out: Vec<String> = writes_set.iter().cloned().collect();
-            Ok(json!({
+            let mut out = json!({
                 "hash": sig_result.hash,
                 "from": from,
                 "to": to,
@@ -417,8 +909,31 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
                 "sig_derived": sig_derived,
                 "pub_main": pub_main,
                 "pub_derived": pub_derived,
-            })
-            .to_string())
+            });
+            if let Some(ref k) = tx_kind {
+                out["tx_kind"] = json!(k);
+            }
+            if let Some(ref id) = escrow_id {
+                out["escrow_id"] = json!(id);
+                out["request_id_hash"] = json!(id);
+            }
+            if let Some(ref p) = purpose {
+                out["purpose"] = json!(p);
+            }
+            if let Some(exp) = expires_at {
+                out["expires_at"] = json!(exp);
+            }
+            if let Some(ref k) = settle_outcome_key {
+                out["settle_outcome_key"] = json!(k);
+            }
+            if let Some(ref p) = settle_payee {
+                out["settle_payee"] = json!(p);
+            }
+            if let Some(ref n) = settle_node {
+                out["settle_node"] = json!(n);
+            }
+            let _ = tx; // constructed for field parity / future validate
+            Ok(out.to_string())
         }
 
         other => Err(PlatariumError::State(format!("unknown method: {}", other))),
@@ -426,6 +941,10 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
 }
 
 pub fn handle_rpc_line(line: &str) -> String {
+    let _guard = dispatch_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
     let req: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => {

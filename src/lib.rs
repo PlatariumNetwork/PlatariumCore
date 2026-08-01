@@ -6,6 +6,7 @@ pub mod utils;
 pub mod error;
 pub mod core;
 pub mod storage;
+pub mod modules;
 
 pub use mnemonic::{generate_mnemonic, validate_mnemonic, CHARACTER_SET};
 pub use key_generator::{KeyGenerator, KeyPair, DerivationPaths, generate_alphanumeric_part};
@@ -20,6 +21,15 @@ pub use core::{Core, TxHash};
 pub use core::asset::Asset;
 pub use core::transaction::Transaction;
 pub use core::state::{State, Address, StateSnapshot, SnapshotableState, TREASURY_ADDRESS};
+pub use modules::escrow::{
+    Escrow, EscrowRules, EscrowStatus, RuleShare, TX_KIND_ESCROW_CANCEL, TX_KIND_ESCROW_LOCK,
+    TX_KIND_ESCROW_REFUND, TX_KIND_ESCROW_SETTLE,
+};
+pub use modules::contacteconomy::{contact_default_rules, PURPOSE_CONTACT};
+pub use modules::payment::{Payment, PlpPayment};
+pub use core::contact_escrow::{
+    ContactEscrowEntry, EscrowOutcome, TX_KIND_CONTACT_ESCROW_LOCK, TX_KIND_CONTACT_ESCROW_SETTLE,
+};
 pub use core::mempool::{Mempool, MAX_FORCED_INCLUSION_QUEUE};
 pub use core::execution::{ExecutionContext, ExecutionLogic, ExecutionError, ExecutionResult};
 pub use core::fee::{
@@ -160,6 +170,17 @@ pub use core::consensus_params::{
     BLOCK_GAS_CAP_UPLP, BLOCK_MAX_TX_COUNT, BLOCK_MAX_WAIT_SEC, BLOCK_MIN_GAS_UPLP,
     BLOCK_MIN_TX_COUNT, FAUCET_ADDRESS,
 };
+pub use core::kernel::{
+    build_ordered_batch, clone_state, commit_state_diff, compute_waves, execute_ordered_batch,
+    AccountPostImage, CommitResult, ExecuteOptions, ExecuteOutcome, ExecutionWave, OrderedBatch,
+    StateDiff, TxReceipt, STATE_DIFF_SCHEMA_VERSION,
+};
+pub use core::dag::{
+    clear_last_commit, dag_to_ordered_batch, get_last_commit, ingest, leader_for_round, linearize,
+    order_digests, set_last_commit, shared_genesis, try_commit, try_commit_batches,
+    vertex_from_params, AuthorId, CommitteeConfig, CommitOutcome, DagStore, DagVertex, IngestResult,
+    IngestStatus, LinearizeResult, OrderDigestsResult, PendingQueue, VertexId, SHARED_GENESIS_AUTHOR,
+};
 pub use storage::{
     AccountRecord, BlockCommit, BlockRecordStored, ReceiptRecord, RocksStore, SNAPSHOT_INTERVAL,
     SnapshotMeta, SCHEMA_VERSION, bootstrap_from_snapshot, build_commit_batch, commit_block,
@@ -168,5 +189,6 @@ pub use storage::{
     rocks_bootstrap_snapshot_json, rocks_commit_block_json, rocks_get_account_json,
     rocks_get_block_json, rocks_get_head_json, rocks_get_receipt_json, rocks_get_snapshot_json,
     rocks_get_state_root_json, rocks_get_tx_json, rocks_list_address_txs_json,
-    rocks_list_snapshots_json,
+    rocks_list_snapshots_json, InMemoryStorageEngine, RocksAccountStorageEngine,
+    StateFileStorageEngine, StorageEngine,
 };

@@ -104,6 +104,30 @@ impl ExecutionLogic {
                 tx.nonce, current_nonce
             )));
         }
+        if tx.is_contact_escrow() {
+            let fee_available = state.fee_spendable_uplp(&tx.from);
+            if fee_available < tx.fee_uplp {
+                return Err(PlatariumError::State(format!(
+                    "Insufficient μPLP for fee: required {}, available {}",
+                    tx.fee_uplp, fee_available
+                )));
+            }
+            if tx.tx_kind.as_deref()
+                == Some(crate::core::contact_escrow::TX_KIND_CONTACT_ESCROW_LOCK)
+            {
+                let plp_bal = state.get_asset_balance(&tx.from, &Asset::PLP);
+                let uplp_bal = state.get_uplp_balance(&tx.from);
+                let fee_from_plp = tx.fee_uplp.saturating_sub(uplp_bal);
+                if plp_bal < tx.amount.saturating_add(fee_from_plp) {
+                    return Err(PlatariumError::State(format!(
+                        "Insufficient asset balance: required {}, available {}",
+                        tx.amount.saturating_add(fee_from_plp),
+                        plp_bal
+                    )));
+                }
+            }
+            return Ok(());
+        }
         let asset_bal = state.get_asset_balance(&tx.from, &tx.asset);
         if asset_bal < tx.amount {
             return Err(PlatariumError::State(format!(
@@ -135,15 +159,75 @@ impl ExecutionLogic {
     
     /// Applies transaction effects: deducts fee from sender’s μPLP and amount from asset balance; credits amount to receiver and fee to treasury. Deterministic.
     pub fn apply_transaction_effects(state: &State, tx: &Transaction) -> Result<()> {
-        state.apply_transfer(
-            &tx.from,
-            &tx.to,
-            &tx.asset,
-            tx.amount,
-            tx.fee_uplp,
-            Some(tx.nonce),
-        )?;
-        Ok(())
+        use crate::modules::escrow::types::{
+            TX_KIND_ESCROW_CANCEL, TX_KIND_ESCROW_LOCK, TX_KIND_ESCROW_REFUND, TX_KIND_ESCROW_SETTLE,
+        };
+        use crate::modules::escrow::rules::AddressBindings;
+        use crate::core::state::TREASURY_ADDRESS;
+        match tx.tx_kind.as_deref() {
+            Some(TX_KIND_ESCROW_LOCK) => {
+                let rid = tx.escrow_id().ok_or_else(|| {
+                    PlatariumError::State("missing escrow_id".into())
+                })?;
+                let purpose = tx.purpose.as_deref().unwrap_or("contact");
+                state.escrow_lock(
+                    &tx.from,
+                    rid,
+                    tx.settle_payee.as_deref().unwrap_or(""),
+                    tx.amount,
+                    &tx.asset,
+                    purpose,
+                    tx.expires_at.unwrap_or(0),
+                    0,
+                    &tx.hash,
+                    tx.fee_uplp,
+                    Some(tx.nonce),
+                )
+            }
+            Some(TX_KIND_ESCROW_SETTLE) => {
+                let rid = tx.escrow_id().ok_or_else(|| {
+                    PlatariumError::State("missing escrow_id".into())
+                })?;
+                let key = tx.settle_outcome_key();
+                let bindings = AddressBindings {
+                    sender: String::new(),
+                    receiver: tx.settle_payee.clone().unwrap_or_default(),
+                    node: tx.settle_node.clone().unwrap_or_default(),
+                    treasury: TREASURY_ADDRESS.to_string(),
+                    burn: "burn".to_string(),
+                };
+                state.escrow_settle(
+                    &tx.from,
+                    rid,
+                    tx.amount,
+                    tx.fee_uplp,
+                    &key,
+                    bindings,
+                    &tx.hash,
+                    Some(tx.nonce),
+                )
+            }
+            Some(TX_KIND_ESCROW_REFUND) => {
+                let rid = tx.escrow_id().ok_or_else(|| {
+                    PlatariumError::State("missing escrow_id".into())
+                })?;
+                state.escrow_refund(&tx.from, rid, tx.fee_uplp, Some(tx.nonce))
+            }
+            Some(TX_KIND_ESCROW_CANCEL) => {
+                let rid = tx.escrow_id().ok_or_else(|| {
+                    PlatariumError::State("missing escrow_id".into())
+                })?;
+                state.escrow_cancel(&tx.from, rid, tx.fee_uplp, Some(tx.nonce))
+            }
+            _ => state.apply_transfer(
+                &tx.from,
+                &tx.to,
+                &tx.asset,
+                tx.amount,
+                tx.fee_uplp,
+                Some(tx.nonce),
+            ),
+        }
     }
     
     /// Executes a transaction (shared logic)

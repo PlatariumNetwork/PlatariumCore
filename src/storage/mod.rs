@@ -5,10 +5,17 @@
 pub mod schema;
 pub mod migrations;
 pub mod rocks;
+pub mod cache;
+pub mod engine;
 pub mod commit;
 pub mod snapshot;
 pub mod query;
 pub mod rpc;
+
+pub use cache::{evict_cached, open_cached};
+pub use engine::{
+    InMemoryStorageEngine, RocksAccountStorageEngine, StateFileStorageEngine, StorageEngine,
+};
 
 pub use commit::{
     AccountRecord, BlockCommit, BlockRecordStored, ReceiptRecord, build_commit_batch, commit_block,

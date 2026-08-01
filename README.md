@@ -177,6 +177,16 @@ platarium-cli select-block-txs \
  --mempool-txs '[]'
 ```
 
+#### Long-lived Core RPC daemon
+
+For production/testnet, run Core as a daemon (Gateway does this automatically when `PLATARIUM_CORE_MODE=rpc`):
+
+```bash
+platarium-cli serve --listen unix:/tmp/platarium-core.sock
+# JSON-RPC 2.0, newline-delimited. Methods mirror CLI commands (hyphens → underscores).
+# Unified pipeline: method "block_cycle" (select → L1 verify → assemble → optional votes/apply/commit).
+```
+
 Core validates nonce order, load-based fee, fee budget, and reserved pending balances. If the
 gas cap is reached, remaining transactions stay in the RAM mempool for the next block.
 

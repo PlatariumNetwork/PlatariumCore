@@ -77,6 +77,42 @@ pub struct Transaction {
     /// HKDF-derived public key hex (required for dual-signature verification when present)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pub_derived: Option<String>,
+
+    /// Optional tx kind: omit/`transfer` = normal transfer; `escrow_lock` / `escrow_settle` / …
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_kind: Option<String>,
+
+    /// Escrow id (opaque). Also accepted as `request_id_hash` for legacy contact txs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id_hash: Option<String>,
+
+    /// Alias for escrow id in newer payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escrow_id: Option<String>,
+
+    /// Application purpose (e.g. "contact").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+
+    /// Escrow expiry (unix seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+
+    /// Settle outcome: 0=accepted, 1=timeout, 2=rejected (legacy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle_outcome: Option<u8>,
+
+    /// Settle outcome key for rules engine (`accept`, `timeout`, `reject`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle_outcome_key: Option<String>,
+
+    /// Recipient payee on accepted settle (financial only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle_payee: Option<String>,
+
+    /// Node operator wallet receiving messaging revenue share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle_node: Option<String>,
 }
 
 impl Transaction {
@@ -107,6 +143,15 @@ impl Transaction {
             sig_derived,
             pub_main: None,
             pub_derived: None,
+            tx_kind: None,
+            request_id_hash: None,
+            escrow_id: None,
+            purpose: None,
+            expires_at: None,
+            settle_outcome: None,
+            settle_outcome_key: None,
+            settle_payee: None,
+            settle_node: None,
         };
         tx.hash = tx.compute_hash()?;
         Ok(tx)
@@ -118,6 +163,39 @@ impl Transaction {
         let mut writes_vec: Vec<String> = self.writes.iter().cloned().collect();
         writes_vec.sort();
         (reads_vec, writes_vec)
+    }
+
+    fn is_escrow_kind(&self) -> bool {
+        matches!(
+            self.tx_kind.as_deref(),
+            Some("escrow_lock")
+                | Some("escrow_settle")
+                | Some("escrow_refund")
+                | Some("escrow_cancel")
+                | Some("contact_escrow_lock")
+                | Some("contact_escrow_settle")
+        )
+    }
+
+    /// Escrow id from `escrow_id` or legacy `request_id_hash`.
+    pub fn escrow_id(&self) -> Option<&str> {
+        self.escrow_id
+            .as_deref()
+            .or(self.request_id_hash.as_deref())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Rules outcome key for settle.
+    pub fn settle_outcome_key(&self) -> String {
+        if let Some(k) = self.settle_outcome_key.as_ref() {
+            return k.clone();
+        }
+        match self.settle_outcome {
+            Some(0) => "accept".into(),
+            Some(1) => "timeout".into(),
+            Some(2) => "reject".into(),
+            _ => "accept".into(),
+        }
     }
     
     /// Computes the transaction hash. Same transaction data -> same hash. No randomness or system time.
@@ -132,6 +210,24 @@ impl Transaction {
             nonce: u64,
             reads: Vec<String>,
             writes: Vec<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            tx_kind: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            request_id_hash: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            escrow_id: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            purpose: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            expires_at: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            settle_outcome: Option<u8>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            settle_outcome_key: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            settle_payee: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            settle_node: Option<String>,
         }
         let (reads_vec, writes_vec) = self.hash_data();
         let hash_data = TransactionHashData {
@@ -143,6 +239,15 @@ impl Transaction {
             nonce: self.nonce,
             reads: reads_vec,
             writes: writes_vec,
+            tx_kind: self.tx_kind.clone(),
+            request_id_hash: self.request_id_hash.clone(),
+            escrow_id: self.escrow_id.clone(),
+            purpose: self.purpose.clone(),
+            expires_at: self.expires_at,
+            settle_outcome: self.settle_outcome,
+            settle_outcome_key: self.settle_outcome_key.clone(),
+            settle_payee: self.settle_payee.clone(),
+            settle_node: self.settle_node.clone(),
         };
         let hash_bytes = hash_message(&hash_data)?;
         Ok(hex::encode(hash_bytes))
@@ -160,6 +265,24 @@ impl Transaction {
             nonce: u64,
             reads: Vec<String>,
             writes: Vec<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            tx_kind: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            request_id_hash: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            escrow_id: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            purpose: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            expires_at: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            settle_outcome: Option<u8>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            settle_outcome_key: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            settle_payee: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            settle_node: Option<String>,
         }
         let (reads_vec, writes_vec) = self.hash_data();
         let message = TransactionHashData {
@@ -171,6 +294,15 @@ impl Transaction {
             nonce: self.nonce,
             reads: reads_vec,
             writes: writes_vec,
+            tx_kind: self.tx_kind.clone(),
+            request_id_hash: self.request_id_hash.clone(),
+            escrow_id: self.escrow_id.clone(),
+            purpose: self.purpose.clone(),
+            expires_at: self.expires_at,
+            settle_outcome: self.settle_outcome,
+            settle_outcome_key: self.settle_outcome_key.clone(),
+            settle_payee: self.settle_payee.clone(),
+            settle_node: self.settle_node.clone(),
         };
         let pub_main = self.pub_main.as_deref().unwrap_or(self.from.as_str());
         let pub_derived = self
@@ -260,6 +392,45 @@ impl Transaction {
             .get("pub_derived")
             .and_then(|x| x.as_str())
             .map(String::from);
+        let tx_kind = v
+            .get("tx_kind")
+            .and_then(|x| x.as_str())
+            .map(String::from);
+        let request_id_hash = v
+            .get("request_id_hash")
+            .or_else(|| v.get("escrowId"))
+            .and_then(|x| x.as_str())
+            .map(String::from);
+        let escrow_id = v
+            .get("escrow_id")
+            .or_else(|| v.get("escrowId"))
+            .and_then(|x| x.as_str())
+            .map(String::from)
+            .or_else(|| request_id_hash.clone());
+        let purpose = v
+            .get("purpose")
+            .and_then(|x| x.as_str())
+            .map(String::from);
+        let expires_at = v.get("expires_at").and_then(|x| {
+            x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+        });
+        let settle_outcome = v.get("settle_outcome").and_then(|x| {
+            x.as_u64()
+                .map(|n| n as u8)
+                .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+        });
+        let settle_outcome_key = v
+            .get("settle_outcome_key")
+            .and_then(|x| x.as_str())
+            .map(String::from);
+        let settle_payee = v
+            .get("settle_payee")
+            .and_then(|x| x.as_str())
+            .map(String::from);
+        let settle_node = v
+            .get("settle_node")
+            .and_then(|x| x.as_str())
+            .map(String::from);
         Ok(Self {
             hash,
             from,
@@ -274,7 +445,26 @@ impl Transaction {
             sig_derived,
             pub_main,
             pub_derived,
+            tx_kind,
+            request_id_hash,
+            escrow_id,
+            purpose,
+            expires_at,
+            settle_outcome,
+            settle_outcome_key,
+            settle_payee,
+            settle_node,
         })
+    }
+
+    /// Returns true when this transaction is a contact escrow lock or settle.
+    pub fn is_contact_escrow(&self) -> bool {
+        self.is_escrow_kind()
+    }
+
+    /// Alias for generic escrow detection.
+    pub fn is_escrow(&self) -> bool {
+        self.is_escrow_kind()
     }
 }
 
