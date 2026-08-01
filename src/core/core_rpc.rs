@@ -99,7 +99,7 @@ fn param_opt_str(params: &Value, key: &str) -> Option<String> {
 /// Dispatch one JSON-RPC method to Core logic. Returns JSON result string.
 pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
     match method {
-        "ping" => Ok(json!({"ok": true, "service": "platarium-core-rpc", "version": "1.2.0"}).to_string()),
+        "ping" => Ok(json!({"ok": true, "service": "platarium-core-rpc", "version": "1.3.0"}).to_string()),
 
         "block_cycle" => block_cycle_json(params),
 

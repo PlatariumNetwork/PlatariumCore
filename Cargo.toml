@@ -1,6 +1,6 @@
 [package]
 name = "platarium-core"
-version = "1.0.5"
+version = "1.0.6"
 edition = "2021"
 authors = ["Platarium Team"]
 description = "High-performance cryptographic core library for Platarium Network, implemented in Rust. Supports BIP39 mnemonic generation, BIP32 HD wallets, ECDSA secp256k1 signatures, and HKDF key derivation."

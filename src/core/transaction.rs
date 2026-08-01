@@ -689,4 +689,76 @@ mod tests {
         assert_eq!(tx.amount, 1_000_000);
         assert_eq!(tx.fee_uplp, 1);
     }
+
+    #[test]
+    fn test_escrow_lock_sign_verify_roundtrip() {
+        use crate::core::core_rpc::dispatch_rpc;
+        use crate::mnemonic::generate_mnemonic;
+        use serde_json::json;
+
+        let (mnemonic, alphanumeric) = generate_mnemonic().unwrap();
+        let keys = dispatch_rpc(
+            "generate_keys",
+            &json!({
+                "mnemonic": mnemonic,
+                "alphanumeric": alphanumeric,
+                "seed_index": 0,
+            }),
+        )
+        .unwrap();
+        let keys_v: serde_json::Value = serde_json::from_str(&keys).unwrap();
+        let from = keys_v["publicKey"].as_str().unwrap().to_string();
+        let to = "PxBobEscrowRoundtrip000000000000000000000000000000000000000001".to_string();
+        let signed = dispatch_rpc(
+            "sign_transaction",
+            &json!({
+                "from": from,
+                "to": to,
+                "asset": "PLP",
+                "amount": 1000u64,
+                "fee_uplp": 1u64,
+                "nonce": 0u64,
+                "reads": "[]",
+                "writes": format!("[\"{}\",\"{}\"]", from, to),
+                "mnemonic": mnemonic,
+                "alphanumeric": alphanumeric,
+                "tx_kind": "escrow_lock",
+                "escrow_id": "eid-roundtrip-1",
+                "purpose": "contact",
+                "expires_at": 1893456000u64,
+                "settle_payee": to,
+            }),
+        )
+        .unwrap();
+        let tx = Transaction::from_gateway_json(&signed).unwrap();
+        assert_eq!(tx.tx_kind.as_deref(), Some("escrow_lock"));
+        assert_eq!(tx.escrow_id.as_deref(), Some("eid-roundtrip-1"));
+        assert!(tx.verify_signatures().unwrap());
+        assert!(tx.validate_basic().is_ok());
+
+        // Injecting escrow fields onto a plain transfer signature must fail (user-facing bug).
+        let plain = dispatch_rpc(
+            "sign_transaction",
+            &json!({
+                "from": from,
+                "to": to,
+                "asset": "PLP",
+                "amount": 1000u64,
+                "fee_uplp": 1u64,
+                "nonce": 0u64,
+                "reads": "[]",
+                "writes": format!("[\"{}\",\"{}\"]", from, to),
+                "mnemonic": mnemonic,
+                "alphanumeric": alphanumeric,
+            }),
+        )
+        .unwrap();
+        let mut inj: serde_json::Value = serde_json::from_str(&plain).unwrap();
+        inj["tx_kind"] = json!("escrow_lock");
+        inj["escrow_id"] = json!("eid-roundtrip-1");
+        inj["request_id_hash"] = json!("eid-roundtrip-1");
+        inj["purpose"] = json!("contact");
+        let bad = Transaction::from_gateway_json(&inj.to_string()).unwrap();
+        assert!(!bad.verify_signatures().unwrap());
+    }
 }
