@@ -3,7 +3,6 @@
 use crate::core::asset::Asset;
 use crate::core::state::{State, Address, TREASURY_ADDRESS};
 use crate::error::Result;
-use crate::modules::escrow::types::BURN_ROLE;
 
 /// Payment interface for escrow and future payment systems.
 pub trait Payment {
@@ -113,7 +112,7 @@ impl Payment for PlpPayment {
 pub fn sink_address(role: &str) -> &'static str {
     match role {
         "treasury" => TREASURY_ADDRESS,
-        "burn" | BURN_ROLE => "burn",
+        "burn" => "burn",
         _ => TREASURY_ADDRESS,
     }
 }

@@ -75,9 +75,6 @@ impl StateSnapshot {
     pub(crate) fn contact_escrows_arc(&self) -> &Arc<HashMap<String, Escrow>> {
         &self.contact_escrows
     }
-    pub(crate) fn escrows_arc(&self) -> &Arc<HashMap<String, Escrow>> {
-        &self.contact_escrows
-    }
 
     /// Returns the PLP balance for the address, or 0 if absent.
     pub fn get_balance(&self, address: &Address) -> u128 {
