@@ -41,11 +41,24 @@ pub struct MempoolEntry {
     pub arrival_index: u64,
 }
 
+/// Maximum number of transaction hashes in the forced-inclusion queue.
+/// Maximum forced-inclusion queue size (Step 5).
+pub const MAX_FORCED_INCLUSION_QUEUE: usize = 256;
+
+/// Hard cap on pending transactions in the mempool (M2). Evicts lowest-fee / oldest on overflow.
+#[cfg(not(test))]
+pub const MAX_MEMPOOL_TXS: usize = 10_000;
+#[cfg(test)]
+pub const MAX_MEMPOOL_TXS: usize = 8;
+
 /// Errors produced by the mempool.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum MempoolError {
     #[error("Duplicate transaction: transaction with hash {0} already exists")]
     DuplicateTransaction(String),
+
+    #[error("Mempool full ({0} txs); could not admit")]
+    MempoolFull(usize),
     
     #[error("Mempool error: {0}")]
     Other(String),
@@ -56,10 +69,6 @@ impl From<MempoolError> for PlatariumError {
         PlatariumError::State(format!("Mempool error: {}", err))
     }
 }
-
-/// Maximum number of transaction hashes in the forced-inclusion queue.
-/// Maximum forced-inclusion queue size (Step 5).
-pub const MAX_FORCED_INCLUSION_QUEUE: usize = 256;
 
 /// Thread-safe transaction pool (mempool) for pending transactions before execution.
 #[derive(Debug)]
@@ -82,24 +91,47 @@ impl Mempool {
         }
     }
 
-    /// Adds a transaction to the mempool. Errors if a transaction with the same hash already exists.
-    ///
-    /// Assigns a monotonic `arrival_index` (node-local, not from system time), stores the transaction, and does not validate or execute it.
     pub fn add_transaction(&self, tx: Transaction) -> Result<()> {
-        let mut transactions = self.transactions.write().unwrap();
-        let mut next = self.next_arrival_index.write().unwrap();
+        let mut evicted: Option<String> = None;
+        {
+            let mut transactions = self.transactions.write().unwrap();
+            let mut next = self.next_arrival_index.write().unwrap();
 
-        if transactions.contains_key(&tx.hash) {
-            return Err(MempoolError::DuplicateTransaction(tx.hash.clone()).into());
+            if transactions.contains_key(&tx.hash) {
+                return Err(MempoolError::DuplicateTransaction(tx.hash.clone()).into());
+            }
+
+            if transactions.len() >= MAX_MEMPOOL_TXS {
+                let victim = transactions
+                    .iter()
+                    .min_by(|(_, a), (_, b)| {
+                        a.tx.fee_uplp
+                            .cmp(&b.tx.fee_uplp)
+                            .then_with(|| a.arrival_index.cmp(&b.arrival_index))
+                    })
+                    .map(|(h, e)| (h.clone(), e.tx.fee_uplp));
+                match victim {
+                    Some((vh, vfee)) if tx.fee_uplp > vfee => {
+                        transactions.remove(&vh);
+                        evicted = Some(vh);
+                    }
+                    _ => {
+                        return Err(MempoolError::MempoolFull(MAX_MEMPOOL_TXS).into());
+                    }
+                }
+            }
+
+            let idx = *next;
+            *next = next.saturating_add(1);
+            transactions.insert(
+                tx.hash.clone(),
+                MempoolEntry { tx, arrival_index: idx },
+            );
         }
-
-        let idx = *next;
-        *next = next.saturating_add(1);
-        transactions.insert(
-            tx.hash.clone(),
-            MempoolEntry { tx, arrival_index: idx },
-        );
-
+        if let Some(vh) = evicted {
+            let mut fi = self.forced_inclusion.write().unwrap();
+            fi.retain(|h| h != &vh);
+        }
         Ok(())
     }
 
@@ -561,5 +593,62 @@ mod tests {
         for (i, (xa, xb)) in a.iter().zip(b.iter()).enumerate() {
             assert_eq!(xa.hash, xb.hash, "index {} differs", i);
         }
+    }
+
+    #[test]
+    fn m2_mempool_hard_cap_evicts_low_fee() {
+        let mempool = Mempool::new();
+        for i in 0..MAX_MEMPOOL_TXS {
+            let tx = Transaction::new(
+                format!("s{}", i),
+                format!("r{}", i),
+                Asset::PLP,
+                1,
+                1, // low fee
+                i as u64,
+                HashSet::new(),
+                HashSet::new(),
+                "sig".into(),
+                "sig".into(),
+            )
+            .unwrap();
+            mempool.add_transaction(tx).unwrap();
+        }
+        assert_eq!(mempool.len(), MAX_MEMPOOL_TXS);
+        // Same fee cannot displace.
+        let same = Transaction::new(
+            "sx".into(),
+            "rx".into(),
+            Asset::PLP,
+            1,
+            1,
+            999,
+            HashSet::new(),
+            HashSet::new(),
+            "sig".into(),
+            "sig".into(),
+        )
+        .unwrap();
+        assert!(matches!(
+            mempool.add_transaction(same),
+            Err(_)
+        ));
+        // Higher fee evicts lowest/oldest.
+        let high = Transaction::new(
+            "sh".into(),
+            "rh".into(),
+            Asset::PLP,
+            1,
+            50,
+            1000,
+            HashSet::new(),
+            HashSet::new(),
+            "sig".into(),
+            "sig".into(),
+        )
+        .unwrap();
+        mempool.add_transaction(high.clone()).unwrap();
+        assert_eq!(mempool.len(), MAX_MEMPOOL_TXS);
+        assert!(mempool.contains(&high.hash));
     }
 }

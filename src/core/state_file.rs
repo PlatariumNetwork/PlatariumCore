@@ -289,6 +289,13 @@ pub fn state_apply_tx_json(path: &Path, tx_json: &str) -> Result<String> {
 }
 
 pub fn state_credit_json(path: &Path, address: &str, plp: u128, uplp: u128, testnet: bool) -> Result<String> {
+    // C4: server-side gate — client `--testnet` alone is not enough.
+    if !crate::core::rpc_security::server_testnet_enabled() {
+        return Err(PlatariumError::State(
+            "state-credit denied: set PLATARIUM_CORE_TESTNET=1 (or PLATARIUM_TESTNET=1) on the Core process"
+                .into(),
+        ));
+    }
     if !testnet {
         return Err(PlatariumError::State(
             "state-credit requires --testnet flag".into(),

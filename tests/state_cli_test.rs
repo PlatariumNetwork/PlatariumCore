@@ -2,6 +2,13 @@
 
 use platarium_core::*;
 use std::collections::HashSet;
+use std::sync::Mutex;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn enable_testnet() {
+    std::env::set_var("PLATARIUM_CORE_TESTNET", "1");
+}
 
 fn temp_state_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("platarium-state-test-{}-{}.json", name, std::process::id()))
@@ -9,6 +16,8 @@ fn temp_state_path(name: &str) -> std::path::PathBuf {
 
 #[test]
 fn state_file_init_query_credit_root() {
+    let _g = ENV_LOCK.lock().unwrap();
+    enable_testnet();
     let path = temp_state_path("init");
     let _ = std::fs::remove_file(&path);
     init_state_file(&path).expect("init");
@@ -26,6 +35,8 @@ fn state_file_init_query_credit_root() {
 
 #[test]
 fn state_validate_rejects_wrong_nonce() {
+    let _g = ENV_LOCK.lock().unwrap();
+    enable_testnet();
     let path = temp_state_path("nonce");
     let _ = std::fs::remove_file(&path);
     init_state_file(&path).expect("init");
@@ -67,6 +78,8 @@ fn state_validate_rejects_wrong_nonce() {
 
 #[test]
 fn state_file_roundtrip_preserves_root() {
+    let _g = ENV_LOCK.lock().unwrap();
+    enable_testnet();
     let path = temp_state_path("roundtrip");
     let _ = std::fs::remove_file(&path);
     init_state_file(&path).expect("init");
@@ -83,6 +96,8 @@ fn state_file_roundtrip_preserves_root() {
 
 #[test]
 fn state_credit_accumulates_balance() {
+    let _g = ENV_LOCK.lock().unwrap();
+    enable_testnet();
     let path = temp_state_path("accumulate");
     let _ = std::fs::remove_file(&path);
     init_state_file(&path).expect("init");

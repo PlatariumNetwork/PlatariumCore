@@ -270,13 +270,7 @@ mod tests {
 
     fn wallet() -> (String, String, String) {
         let (mnemonic, alpha) = generate_mnemonic().unwrap();
-        let kg = KeyGenerator::new(0, None, None, None).unwrap();
-        let keys = kg.restore_keys(&mnemonic, &alpha, 0, None).unwrap();
-        let from = if keys.public_key.starts_with("Px") {
-            keys.public_key.clone()
-        } else {
-            format!("Px{}", keys.public_key)
-        };
+        let from = crate::signer::signing_address_from_mnemonic(&mnemonic, &alpha).unwrap();
         (mnemonic, alpha, from)
     }
 

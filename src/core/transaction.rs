@@ -29,6 +29,36 @@ pub enum TransactionValidationError {
 
     #[error("Hash mismatch: expected {0}, got {1}")]
     HashMismatch(String, String),
+
+    #[error("Missing pub_main: sender public key is required")]
+    MissingPubMain,
+
+    #[error("Missing pub_derived: dual-signature public key is required")]
+    MissingPubDerived,
+
+    #[error("pub_derived must differ from pub_main")]
+    DuplicatePubKeys,
+
+    #[error("from address is not bound to pub_main")]
+    FromPubkeyMismatch,
+}
+
+/// Strip optional `Px` / `px` / `PX` prefix and lowercase hex for address↔pubkey comparison.
+pub fn address_pubkey_hex(addr_or_pubkey: &str) -> String {
+    let t = addr_or_pubkey.trim();
+    let hex = if t.len() >= 2 && t.as_bytes()[..2].eq_ignore_ascii_case(b"Px") {
+        &t[2..]
+    } else {
+        t
+    };
+    hex.to_ascii_lowercase()
+}
+
+/// True when `from` (Px… or bare hex) matches `pub_main` hex.
+pub fn pubkey_binds_to_from(from: &str, pub_main: &str) -> bool {
+    let a = address_pubkey_hex(from);
+    let b = address_pubkey_hex(pub_main);
+    !a.is_empty() && a == b
 }
 
 /// Result type for transaction validation.
@@ -304,11 +334,12 @@ impl Transaction {
             settle_payee: self.settle_payee.clone(),
             settle_node: self.settle_node.clone(),
         };
-        let pub_main = self.pub_main.as_deref().unwrap_or(self.from.as_str());
-        let pub_derived = self
-            .pub_derived
-            .as_deref()
-            .unwrap_or(pub_main);
+        let pub_main = self.pub_main.as_deref().ok_or_else(|| {
+            PlatariumError::Validation("missing pub_main for signature verification".into())
+        })?;
+        let pub_derived = self.pub_derived.as_deref().ok_or_else(|| {
+            PlatariumError::Validation("missing pub_derived for signature verification".into())
+        })?;
         let main_verified = verify_signature(&message, &self.sig_main, pub_main)?;
         if !main_verified {
             return Ok(false);
@@ -323,7 +354,8 @@ impl Transaction {
     }
 
     /// Validates basic transaction properties (no state access).
-    /// Amount > 0; fee in μPLP, fee >= MIN_FEE_UPLP (fee = 0 forbidden); signatures.
+    /// Amount > 0; fee in μPLP, fee >= MIN_FEE_UPLP (fee = 0 forbidden); signatures;
+    /// `from` bound to `pub_main`; dual keys distinct; hash matches payload.
     /// Fee currency is fixed to μPLP and is not configurable.
     pub fn validate_basic(&self) -> ValidationResult {
         if self.amount == 0 {
@@ -334,6 +366,33 @@ impl Transaction {
                 MIN_FEE_UPLP,
                 self.fee_uplp,
             ));
+        }
+        let pub_main = self
+            .pub_main
+            .as_deref()
+            .ok_or(TransactionValidationError::MissingPubMain)?;
+        let pub_derived = self
+            .pub_derived
+            .as_deref()
+            .ok_or(TransactionValidationError::MissingPubDerived)?;
+        if address_pubkey_hex(pub_main) == address_pubkey_hex(pub_derived) {
+            return Err(TransactionValidationError::DuplicatePubKeys);
+        }
+        if !pubkey_binds_to_from(&self.from, pub_main) {
+            return Err(TransactionValidationError::FromPubkeyMismatch);
+        }
+        match self.validate_hash() {
+            Ok(true) => {}
+            Ok(false) => {
+                let expected = self.compute_hash().unwrap_or_default();
+                return Err(TransactionValidationError::HashMismatch(
+                    expected,
+                    self.hash.clone(),
+                ));
+            }
+            Err(e) => {
+                return Err(TransactionValidationError::InvalidSignature(e.to_string()));
+            }
         }
         match self.verify_signatures() {
             Ok(true) => {}
@@ -595,9 +654,9 @@ mod tests {
         .unwrap();
         let result = tx.validate_basic();
         assert!(result.is_err());
-        if let Err(TransactionValidationError::InvalidSignature(_)) = result {
+        if let Err(TransactionValidationError::MissingPubMain) = result {
         } else {
-            panic!("Expected InvalidSignature error");
+            panic!("Expected MissingPubMain error, got: {:?}", result);
         }
     }
 
@@ -664,10 +723,182 @@ mod tests {
         .unwrap();
         let result = tx.validate_basic();
         assert!(result.is_err());
-        if let Err(TransactionValidationError::InvalidSignature(_)) = result {
+        if let Err(TransactionValidationError::MissingPubMain) = result {
         } else {
-            panic!("Expected InvalidSignature (fee validation should have passed)");
+            panic!("Expected MissingPubMain (fee validation should have passed), got: {:?}", result);
         }
+    }
+
+    #[test]
+    fn test_pubkey_binds_to_from_px_prefix() {
+        assert!(pubkey_binds_to_from(
+            "Pxaabbcc",
+            "aabbcc"
+        ));
+        assert!(pubkey_binds_to_from("aabbcc", "PxAaBbCc"));
+        assert!(!pubkey_binds_to_from("Pxvictim", "attacker"));
+    }
+
+    #[test]
+    fn test_validate_basic_rejects_from_pubkey_mismatch() {
+        use crate::generate_mnemonic;
+        use crate::signer::sign_with_both_keys;
+        use crate::signature::normalize_signature_hex;
+        use crate::KeyGenerator;
+        use serde::Serialize;
+
+        #[derive(Serialize)]
+        struct TxHashData {
+            from: String,
+            to: String,
+            asset: String,
+            amount: u128,
+            fee_uplp: u128,
+            nonce: u64,
+            reads: Vec<String>,
+            writes: Vec<String>,
+        }
+
+        let (mnemonic, alpha) = generate_mnemonic().unwrap();
+        let real_from = crate::signer::signing_address_from_mnemonic(&mnemonic, &alpha).unwrap();
+        let victim = "Px000000000000000000000000000000000000000000000000000000000000000001";
+        let to = "PxBob0000000000000000000000000000000000000000000000000000000000001";
+        let message = TxHashData {
+            from: victim.to_string(),
+            to: to.to_string(),
+            asset: Asset::PLP.as_canonical(),
+            amount: 100,
+            fee_uplp: 1,
+            nonce: 0,
+            reads: vec![],
+            writes: vec![],
+        };
+        let sig = sign_with_both_keys(&message, &mnemonic, &alpha).unwrap();
+        let tx = Transaction {
+            hash: sig.hash.clone(),
+            from: victim.to_string(),
+            to: to.to_string(),
+            asset: Asset::PLP,
+            amount: 100,
+            fee_uplp: 1,
+            nonce: 0,
+            reads: HashSet::new(),
+            writes: HashSet::new(),
+            sig_main: normalize_signature_hex(&sig.signatures[0].signature_compact),
+            sig_derived: normalize_signature_hex(&sig.signatures[1].signature_compact),
+            pub_main: Some(sig.signatures[0].pub_key.clone()),
+            pub_derived: Some(sig.signatures[1].pub_key.clone()),
+            tx_kind: None,
+            request_id_hash: None,
+            settle_outcome: None,
+            settle_outcome_key: None,
+            escrow_id: None,
+            purpose: None,
+            expires_at: None,
+            settle_payee: None,
+            settle_node: None,
+        };
+        assert_ne!(address_pubkey_hex(&real_from), address_pubkey_hex(victim));
+        let err = tx.validate_basic().expect_err("must reject stolen from");
+        assert_eq!(err, TransactionValidationError::FromPubkeyMismatch);
+    }
+
+    #[test]
+    fn test_validate_basic_rejects_hash_mismatch() {
+        use crate::generate_mnemonic;
+        use crate::signer::sign_with_both_keys;
+        use crate::signature::normalize_signature_hex;
+        use crate::KeyGenerator;
+        use serde::Serialize;
+
+        #[derive(Serialize)]
+        struct TxHashData {
+            from: String,
+            to: String,
+            asset: String,
+            amount: u128,
+            fee_uplp: u128,
+            nonce: u64,
+            reads: Vec<String>,
+            writes: Vec<String>,
+        }
+
+        let (mnemonic, alpha) = generate_mnemonic().unwrap();
+        let from = crate::signer::signing_address_from_mnemonic(&mnemonic, &alpha).unwrap();
+        let to = "PxBob0000000000000000000000000000000000000000000000000000000000001";
+        let message = TxHashData {
+            from: from.clone(),
+            to: to.to_string(),
+            asset: Asset::PLP.as_canonical(),
+            amount: 100,
+            fee_uplp: 1,
+            nonce: 0,
+            reads: vec![],
+            writes: vec![],
+        };
+        let sig = sign_with_both_keys(&message, &mnemonic, &alpha).unwrap();
+        let mut tx = Transaction {
+            hash: sig.hash.clone(),
+            from: from.clone(),
+            to: to.to_string(),
+            asset: Asset::PLP,
+            amount: 100,
+            fee_uplp: 1,
+            nonce: 0,
+            reads: HashSet::new(),
+            writes: HashSet::new(),
+            sig_main: normalize_signature_hex(&sig.signatures[0].signature_compact),
+            sig_derived: normalize_signature_hex(&sig.signatures[1].signature_compact),
+            pub_main: Some(sig.signatures[0].pub_key.clone()),
+            pub_derived: Some(sig.signatures[1].pub_key.clone()),
+            tx_kind: None,
+            request_id_hash: None,
+            settle_outcome: None,
+            settle_outcome_key: None,
+            escrow_id: None,
+            purpose: None,
+            expires_at: None,
+            settle_payee: None,
+            settle_node: None,
+        };
+        assert!(tx.validate_basic().is_ok());
+        tx.hash = "deadbeef".into();
+        assert!(matches!(
+            tx.validate_basic(),
+            Err(TransactionValidationError::HashMismatch(_, _))
+        ));
+    }
+
+    #[test]
+    fn test_validate_basic_rejects_duplicate_pubkeys() {
+        let tx = Transaction {
+            hash: "h".into(),
+            from: "Pxaa".into(),
+            to: "Pxbb".into(),
+            asset: Asset::PLP,
+            amount: 1,
+            fee_uplp: 1,
+            nonce: 0,
+            reads: HashSet::new(),
+            writes: HashSet::new(),
+            sig_main: "00".into(),
+            sig_derived: "11".into(),
+            pub_main: Some("aa".into()),
+            pub_derived: Some("aa".into()),
+            tx_kind: None,
+            request_id_hash: None,
+            settle_outcome: None,
+            settle_outcome_key: None,
+            escrow_id: None,
+            purpose: None,
+            expires_at: None,
+            settle_payee: None,
+            settle_node: None,
+        };
+        assert_eq!(
+            tx.validate_basic().unwrap_err(),
+            TransactionValidationError::DuplicatePubKeys
+        );
     }
 
     #[test]
@@ -762,3 +993,4 @@ mod tests {
         assert!(!bad.verify_signatures().unwrap());
     }
 }
+// temp - will remove

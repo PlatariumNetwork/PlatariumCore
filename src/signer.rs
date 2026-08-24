@@ -73,6 +73,20 @@ pub fn sign_with_both_keys<T: serde::Serialize>(
     })
 }
 
+/// Canonical wallet address (`Px` + compressed main signing pubkey) for a mnemonic.
+/// This is the address that must appear in `tx.from` for `validate_basic` (C1).
+pub fn signing_address_from_mnemonic(mnemonic: &str, alphanumeric_part: &str) -> Result<String> {
+    use secp256k1::{PublicKey, Secp256k1};
+    let seed = generate_master_seed(mnemonic, alphanumeric_part)?;
+    let main_key_info = format!("mainKey-{}", alphanumeric_part);
+    let main_private_key_bytes = derive_hkdf_key(&seed, main_key_info.as_bytes())?;
+    let main_private_key = SecretKey::from_slice(&main_private_key_bytes)
+        .map_err(|e| PlatariumError::Crypto(format!("Invalid main private key: {}", e)))?;
+    let secp = Secp256k1::new();
+    let pub_key = PublicKey::from_secret_key(&secp, &main_private_key);
+    Ok(format!("Px{}", hex::encode(pub_key.serialize())))
+}
+
 #[derive(Debug, Clone)]
 pub struct DualSignature {
     pub hash: String,

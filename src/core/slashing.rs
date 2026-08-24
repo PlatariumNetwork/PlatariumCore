@@ -87,7 +87,9 @@ pub fn apply_slash_with_threshold(
     let stake_slash = stake_slash_for(reason);
 
     let new_stake = node.stake.saturating_sub(stake_slash);
-    registry.set_stake(node_id, new_stake)?;
+    // Stake first without recomputing reputation (set_stake recomputes from components and
+    // would wipe a prior reputation penalty).
+    registry.set_stake_raw(node_id, new_stake)?;
     registry.apply_reputation_penalty(node_id, rep_penalty, suspension_threshold)?;
 
     Ok(())

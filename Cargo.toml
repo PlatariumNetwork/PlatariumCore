@@ -70,3 +70,19 @@ path = "tests/state_cli_test.rs"
 [[test]]
 name = "consensus_cli"
 path = "tests/consensus_cli_test.rs"
+
+[[test]]
+name = "critical_security"
+path = "tests/critical_security_test.rs"
+
+[[test]]
+name = "high_security"
+path = "tests/high_security_test.rs"
+
+[[test]]
+name = "medium_security"
+path = "tests/medium_security_test.rs"
+
+[[test]]
+name = "low_security"
+path = "tests/low_security_test.rs"

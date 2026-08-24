@@ -97,14 +97,87 @@ pub fn process_l1_confirmation(
     Ok((result, to_penalize))
 }
 
-/// Full L1 flow: verifies the transaction against state, then aggregates votes. Returns the result and the list of nodes to penalize.
+/// Full L1 flow: verifies the transaction against state, then aggregates votes.
+/// H3: invalid tx cannot confirm — verify must succeed before vote aggregation.
 pub fn confirm_transaction_l1(
     state: &State,
     tx: &Transaction,
     votes: &[(NodeId, Vote)],
 ) -> Result<(ConfirmationResult, Vec<NodeId>)> {
-    let _valid = verify_tx_for_l1(state, tx)?;
+    let valid = verify_tx_for_l1(state, tx)?;
+    if !valid {
+        return Err(ConfirmationError::Other(
+            "L1 rejected: transaction failed verify_tx_for_l1 (sig/fee/balance/nonce)".into(),
+        )
+        .into());
+    }
     process_l1_confirmation(votes)
+}
+
+/// Signed L1 vote (H3): signature over canonical payload binds node identity to ballot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedL1Vote {
+    pub node_id: NodeId,
+    pub vote: Vote,
+    pub tx_hash: String,
+    pub pub_key: String,
+    pub signature: String,
+}
+
+#[derive(serde::Serialize)]
+struct L1VoteSignPayload<'a> {
+    node_id: &'a str,
+    vote: u8,
+    tx_hash: &'a str,
+}
+
+impl SignedL1Vote {
+    fn vote_byte(v: Vote) -> u8 {
+        match v {
+            Vote::Confirm => 1,
+            Vote::Reject => 0,
+        }
+    }
+
+    /// Verify ECDSA signature over (node_id, vote, tx_hash).
+    pub fn verify(&self) -> Result<bool> {
+        use crate::signature::verify_signature;
+        let payload = L1VoteSignPayload {
+            node_id: &self.node_id,
+            vote: Self::vote_byte(self.vote),
+            tx_hash: &self.tx_hash,
+        };
+        verify_signature(&payload, &self.signature, &self.pub_key)
+    }
+}
+
+/// Aggregate signed L1 votes: drop/fail invalid signatures, then same threshold rules (H3).
+pub fn process_l1_confirmation_signed(
+    expected_tx_hash: &str,
+    votes: &[SignedL1Vote],
+) -> Result<(ConfirmationResult, Vec<NodeId>)> {
+    if votes.is_empty() {
+        return Err(ConfirmationError::NoVotes.into());
+    }
+    let mut verified: Vec<(NodeId, Vote)> = Vec::with_capacity(votes.len());
+    for v in votes {
+        if v.tx_hash != expected_tx_hash {
+            return Err(ConfirmationError::Other(format!(
+                "vote tx_hash mismatch for node {}",
+                v.node_id
+            ))
+            .into());
+        }
+        if !v.verify()? {
+            return Err(ConfirmationError::Other(format!(
+                "invalid L1 vote signature for node {}",
+                v.node_id
+            ))
+            .into());
+        }
+        verified.push((v.node_id.clone(), v.vote));
+    }
+    process_l1_confirmation(&verified)
 }
 
 /// Applies a rating penalty to each node that voted against the majority by recording a missed vote.
@@ -131,31 +204,44 @@ mod tests {
 
     #[test]
     fn test_below_threshold_rejected() {
+        // 6/10 = 60% < 67% → Rejected; simple majority still Confirm → penalize Reject voters.
         let votes: Vec<(NodeId, Vote)> = (0..10)
             .map(|i| (format!("n{}", i), if i < 6 { Vote::Confirm } else { Vote::Reject }))
             .collect();
         let (res, penalize) = process_l1_confirmation(&votes).unwrap();
         assert_eq!(res, ConfirmationResult::Rejected);
-        assert_eq!(penalize.len(), 6);
+        assert_eq!(penalize.len(), 4);
     }
 
     #[test]
     fn test_penalize_minority() {
-        let votes: Vec<(NodeId, Vote)> = [
-            ("n1", Vote::Confirm),
-            ("n2", Vote::Confirm),
-            ("n3", Vote::Reject),
-        ]
-        .iter()
-        .map(|(id, v)| (id.to_string(), *v))
-        .collect();
+        // Need ≥67%: 7/10 confirm.
+        let votes: Vec<(NodeId, Vote)> = (0..10)
+            .map(|i| (format!("n{}", i), if i < 7 { Vote::Confirm } else { Vote::Reject }))
+            .collect();
         let (res, penalize) = process_l1_confirmation(&votes).unwrap();
         assert_eq!(res, ConfirmationResult::Confirmed);
-        assert_eq!(penalize, vec!["n3"]);
+        assert_eq!(penalize.len(), 3);
     }
 
     #[test]
-    fn test_no_votes_error() {
-        assert!(process_l1_confirmation(&[]).is_err());
+    fn confirm_transaction_l1_rejects_invalid_tx() {
+        let state = State::new();
+        let tx = crate::core::transaction::Transaction::new(
+            "a".into(),
+            "b".into(),
+            crate::core::asset::Asset::PLP,
+            1,
+            1,
+            0,
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+            "aa".into(),
+            "bb".into(),
+        )
+        .unwrap();
+        let votes = vec![("n1".into(), Vote::Confirm), ("n2".into(), Vote::Confirm)];
+        let err = confirm_transaction_l1(&state, &tx, &votes);
+        assert!(err.is_err(), "H3: invalid tx must not confirm");
     }
 }

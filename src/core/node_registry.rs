@@ -336,14 +336,30 @@ impl NodeRegistry {
     }
 
     /// Updates a node’s stake and recomputes reputation for all nodes (StakeWeight depends on global max stake).
+    /// Sets stake and recomputes reputation (stake weight depends on max stake).
     pub fn set_stake(&self, node_id: &NodeId, stake: u128) -> Result<()> {
+        let max_stake = {
+            let mut nodes = self.nodes.write().unwrap();
+            let node = nodes
+                .get_mut(node_id)
+                .ok_or_else(|| NodeRegistryError::NodeNotFound(node_id.clone()))?;
+            node.stake = stake;
+            nodes.values().map(|n| n.stake).max().unwrap_or(0)
+        };
         let mut nodes = self.nodes.write().unwrap();
-        let node = nodes.get_mut(node_id).ok_or_else(|| NodeRegistryError::NodeNotFound(node_id.clone()))?;
-        node.stake = stake;
-        let max_stake = nodes.values().map(|n| n.stake).max().unwrap_or(0);
         for n in nodes.values_mut() {
             n.compute_reputation(max_stake);
         }
+        Ok(())
+    }
+
+    /// Sets stake without recomputing reputation (used by slashing after explicit penalty).
+    pub fn set_stake_raw(&self, node_id: &NodeId, stake: u128) -> Result<()> {
+        let mut nodes = self.nodes.write().unwrap();
+        let node = nodes
+            .get_mut(node_id)
+            .ok_or_else(|| NodeRegistryError::NodeNotFound(node_id.clone()))?;
+        node.stake = stake;
         Ok(())
     }
 

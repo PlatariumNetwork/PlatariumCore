@@ -151,12 +151,8 @@ pub fn mempool_admit(
     };
 
     if tx.from == FAUCET_ADDRESS {
-        return MempoolAdmitResult {
-            accepted: true,
-            error: None,
-            min_fee_uplp: min_fee,
-            expected_nonce: tx.nonce,
-        };
+        // H6: faucet must still pass validate_basic / fee / nonce checks — no shortcut.
+        // Continue into the normal admit path below.
     }
 
     let chain_nonce = state.get_nonce(&tx.from);
@@ -295,7 +291,7 @@ pub fn block_proposal_status(mempool: &[MempoolSnapshotEntry], now_unix: i64) ->
 pub fn select_block_txs(state: &State, mempool: &[MempoolSnapshotEntry]) -> SelectBlockTxsResult {
     let mut chain_nonce: HashMap<String, u64> = HashMap::new();
     for e in mempool {
-        if e.tx.from.is_empty() || e.tx.from == FAUCET_ADDRESS {
+        if e.tx.from.is_empty() {
             continue;
         }
         chain_nonce
@@ -312,7 +308,8 @@ pub fn select_block_txs(state: &State, mempool: &[MempoolSnapshotEntry]) -> Sele
             break;
         }
         let from = &entry.tx.from;
-        if !from.is_empty() && from != FAUCET_ADDRESS {
+        // H6: faucet address is not exempt from nonce ordering.
+        if !from.is_empty() {
             let want = *next_nonce.get(from).unwrap_or(&0);
             if entry.tx.nonce != want {
                 continue;
@@ -433,14 +430,15 @@ mod tests {
     #[test]
     fn select_respects_gas_cap() {
         let state = State::new();
+        // Fees sized so only two fit under BLOCK_GAS_CAP_UPLP (500_000).
         let mempool = vec![
-            entry("a", "PxA", 0, 2000, 0),
-            entry("b", "PxB", 0, 2000, 1),
-            entry("c", "PxC", 0, 2000, 2),
+            entry("a", "PxA", 0, 200_000, 0),
+            entry("b", "PxB", 0, 200_000, 1),
+            entry("c", "PxC", 0, 200_000, 2),
         ];
         let r = select_block_txs(&state, &mempool);
         assert_eq!(r.tx_count, 2);
-        assert_eq!(r.gas_used, 4000);
+        assert_eq!(r.gas_used, 400_000);
         assert_eq!(r.hashes, vec!["a", "b"]);
     }
 
@@ -502,10 +500,53 @@ mod tests {
 
     #[test]
     fn mempool_admit_allows_future_nonce_within_gap() {
+        use crate::generate_mnemonic;
+        use crate::signer::{sign_with_both_keys, signing_address_from_mnemonic};
+        use crate::signature::normalize_signature_hex;
+        use serde::Serialize;
+        #[derive(Serialize)]
+        struct TxHashData {
+            from: String,
+            to: String,
+            asset: String,
+            amount: u128,
+            fee_uplp: u128,
+            nonce: u64,
+            reads: Vec<String>,
+            writes: Vec<String>,
+        }
+        let (mnemonic, alpha) = generate_mnemonic().unwrap();
+        let from = signing_address_from_mnemonic(&mnemonic, &alpha).unwrap();
         let state = State::new();
-        state.set_balance(&"PxA".to_string(), 1000);
-        let tx = r#"{"hash":"t1","from":"PxA","to":"PxB","asset":"PLP","amount":1,"fee_uplp":1,"nonce":5,"reads":[],"writes":[],"sig_main":"aa","sig_derived":"bb"}"#;
-        let r = mempool_admit(&state, tx, &[]);
+        state.set_balance(&from, 1000);
+        state.set_uplp_balance(&from, 10);
+        let message = TxHashData {
+            from: from.clone(),
+            to: "PxB".into(),
+            asset: "PLP".into(),
+            amount: 1,
+            fee_uplp: 1,
+            nonce: 5,
+            reads: vec![],
+            writes: vec![],
+        };
+        let sig = sign_with_both_keys(&message, &mnemonic, &alpha).unwrap();
+        let tx = serde_json::json!({
+            "hash": sig.hash,
+            "from": from,
+            "to": "PxB",
+            "asset": "PLP",
+            "amount": 1,
+            "fee_uplp": 1,
+            "nonce": 5,
+            "reads": [],
+            "writes": [],
+            "sig_main": normalize_signature_hex(&sig.signatures[0].signature_compact),
+            "sig_derived": normalize_signature_hex(&sig.signatures[1].signature_compact),
+            "pub_main": sig.signatures[0].pub_key,
+            "pub_derived": sig.signatures[1].pub_key,
+        }).to_string();
+        let r = mempool_admit(&state, &tx, &[]);
         assert!(r.accepted, "{:?}", r.error);
         assert_eq!(r.expected_nonce, 0);
     }

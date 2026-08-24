@@ -29,9 +29,9 @@ fn select_respects_gas_cap() {
     let state = State::new();
     let mempool_json = format!(
         "[{},{},{}]",
-        entry_json("a", "PxA", 0, 2000, 1, 0),
-        entry_json("b", "PxB", 0, 2000, 1, 1),
-        entry_json("c", "PxC", 0, 2000, 1, 2),
+        entry_json("a", "PxA", 0, 200_000, 1, 0),
+        entry_json("b", "PxB", 0, 200_000, 1, 1),
+        entry_json("c", "PxC", 0, 200_000, 1, 2),
     );
     let mempool = parse_mempool_snapshot(&mempool_json).unwrap();
     let r = select_block_txs(&state, &mempool);

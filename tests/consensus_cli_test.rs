@@ -2,6 +2,13 @@
 
 use platarium_core::*;
 use std::collections::HashSet;
+use std::sync::Mutex;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn enable_testnet() {
+    std::env::set_var("PLATARIUM_CORE_TESTNET", "1");
+}
 
 fn temp_state_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("platarium-consensus-test-{}-{}.json", name, std::process::id()))
@@ -19,6 +26,8 @@ fn l1_process_votes_confirms_at_67_percent() {
 
 #[test]
 fn assemble_block_returns_deterministic_hash() {
+    let _g = ENV_LOCK.lock().unwrap();
+    enable_testnet();
     let path = temp_state_path("assemble");
     let _ = std::fs::remove_file(&path);
     init_state_file(&path).expect("init");
@@ -33,6 +42,8 @@ fn assemble_block_returns_deterministic_hash() {
 
 #[test]
 fn l1_verify_txs_rejects_bad_nonce() {
+    let _g = ENV_LOCK.lock().unwrap();
+    enable_testnet();
     let path = temp_state_path("l1verify");
     let _ = std::fs::remove_file(&path);
     init_state_file(&path).expect("init");

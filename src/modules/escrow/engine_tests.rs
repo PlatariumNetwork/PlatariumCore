@@ -17,10 +17,9 @@ mod escrow_engine_tests {
         let locker = "locker".to_string();
         let payee = "payee".to_string();
         let node = "node_op".to_string();
-        let settler = "settler".to_string();
+        let settler = payee.clone(); // accept must be beneficiary (C5)
         state.set_balance(&locker, 2_000_000);
         state.set_uplp_balance(&locker, 10);
-        state.set_balance(&settler, 100);
         state.set_uplp_balance(&settler, 10);
 
         state
@@ -62,7 +61,7 @@ mod escrow_engine_tests {
                 Some(0),
             )
             .expect("settle");
-        assert_eq!(state.get_balance(&payee), 700_000);
+        assert_eq!(state.get_balance(&payee), 700_000); // fee paid from settler μPLP, not PLP credit
         assert_eq!(state.get_balance(&node), 200_000);
         assert_eq!(state.get_balance(&"treasury".to_string()) >= 100_000, true);
         assert_eq!(state.get_escrow("eid-1").unwrap().status, EscrowStatus::Released);
@@ -72,11 +71,9 @@ mod escrow_engine_tests {
     fn timeout_refunds_sender() {
         let state = State::new();
         let locker = "locker2".to_string();
-        let settler = "settler2".to_string();
+        let settler = locker.clone(); // timeout authorized for creator (C5)
         state.set_balance(&locker, 1_000_000);
         state.set_uplp_balance(&locker, 5);
-        state.set_balance(&settler, 50);
-        state.set_uplp_balance(&settler, 5);
         state
             .escrow_lock(
                 &locker,
@@ -120,11 +117,9 @@ mod escrow_engine_tests {
     fn reject_refunds_majority() {
         let state = State::new();
         let locker = "locker3".to_string();
-        let settler = "settler3".to_string();
+        let settler = locker.clone(); // legacy empty beneficiary → creator settles reject
         state.set_balance(&locker, 1_000_000);
         state.set_uplp_balance(&locker, 5);
-        state.set_balance(&settler, 50);
-        state.set_uplp_balance(&settler, 5);
         state
             .lock_contact_escrow(&locker, "eid-3", 100_000, 1, None)
             .unwrap();
@@ -149,17 +144,29 @@ mod escrow_engine_tests {
     fn invalid_double_settle() {
         let state = State::new();
         let locker = "L".to_string();
-        let settler = "S".to_string();
+        let settler = "R".to_string(); // beneficiary accepts
         state.set_balance(&locker, 1_000_000);
         state.set_uplp_balance(&locker, 10);
         state.set_balance(&settler, 100);
         state.set_uplp_balance(&settler, 10);
         state
-            .lock_contact_escrow(&locker, "dup", 10_000, 1, None)
+            .escrow_lock(
+                &locker,
+                "dup",
+                &settler,
+                10_000,
+                &Asset::PLP,
+                PURPOSE_CONTACT,
+                0,
+                0,
+                "lh",
+                1,
+                None,
+            )
             .unwrap();
         let bindings = AddressBindings {
             sender: locker.clone(),
-            receiver: "R".into(),
+            receiver: settler.clone(),
             node: "N".into(),
             treasury: "treasury".into(),
             burn: "burn".into(),
@@ -203,7 +210,7 @@ mod escrow_engine_tests {
     fn invalid_amount_settle() {
         let state = State::new();
         let locker = "Lx".to_string();
-        let settler = "Sx".to_string();
+        let settler = "R".to_string(); // beneficiary
         state.set_balance(&locker, 1_000_000);
         state.set_uplp_balance(&locker, 5);
         state.set_balance(&settler, 50);
@@ -212,7 +219,7 @@ mod escrow_engine_tests {
             .escrow_lock(
                 &locker,
                 "bad-amt",
-                "R",
+                &settler,
                 100_000,
                 &Asset::PLP,
                 PURPOSE_CONTACT,
@@ -231,7 +238,7 @@ mod escrow_engine_tests {
             OUTCOME_ACCEPT,
             AddressBindings {
                 sender: locker,
-                receiver: "R".into(),
+                receiver: settler.clone(),
                 node: "N".into(),
                 treasury: "treasury".into(),
                 burn: "burn".into(),
@@ -240,13 +247,15 @@ mod escrow_engine_tests {
             None,
         );
         assert!(err.is_err());
+        // C6: failed settle must not burn settler fee
+        assert_eq!(state.get_uplp_balance(&settler), 5);
     }
 
     #[test]
     fn escrow_refund_path() {
         let state = State::new();
         let locker = "Lr".to_string();
-        let settler = "Sr".to_string();
+        let settler = "Rb".to_string(); // beneficiary rejects/refunds
         state.set_balance(&locker, 1_000_000);
         state.set_uplp_balance(&locker, 5);
         state.set_balance(&settler, 50);
@@ -255,7 +264,7 @@ mod escrow_engine_tests {
             .escrow_lock(
                 &locker,
                 "ref-1",
-                "Rb",
+                &settler,
                 200_000,
                 &Asset::PLP,
                 PURPOSE_CONTACT,
@@ -299,5 +308,81 @@ mod escrow_engine_tests {
         state.escrow_cancel(&locker, "can-1", 1, None).unwrap();
         let st = state.get_escrow("can-1").unwrap().status;
         assert!(matches!(st, EscrowStatus::Refunded | EscrowStatus::Cancelled));
+    }
+
+    #[test]
+    fn unauthorized_settler_rejected_without_fee_burn() {
+        let state = State::new();
+        let locker = "Lu".to_string();
+        let beneficiary = "Bu".to_string();
+        let stranger = "Su".to_string();
+        state.set_balance(&locker, 1_000_000);
+        state.set_uplp_balance(&locker, 5);
+        state.set_balance(&stranger, 100);
+        state.set_uplp_balance(&stranger, 10);
+        state
+            .escrow_lock(
+                &locker,
+                "unauth-1",
+                &beneficiary,
+                100_000,
+                &Asset::PLP,
+                PURPOSE_CONTACT,
+                0,
+                0,
+                "lh",
+                1,
+                None,
+            )
+            .unwrap();
+        let err = state.escrow_settle(
+            &stranger,
+            "unauth-1",
+            100_000,
+            1,
+            OUTCOME_ACCEPT,
+            AddressBindings {
+                sender: locker,
+                receiver: beneficiary,
+                node: "N".into(),
+                treasury: "treasury".into(),
+                burn: "burn".into(),
+            },
+            "sh",
+            None,
+        );
+        assert!(err.is_err());
+        assert_eq!(state.get_uplp_balance(&stranger), 10);
+        assert_eq!(
+            state.get_escrow("unauth-1").unwrap().status,
+            EscrowStatus::Locked
+        );
+    }
+
+    #[test]
+    fn settle_missing_escrow_does_not_debit_fee() {
+        let state = State::new();
+        let settler = "Sm".to_string();
+        state.set_balance(&settler, 100);
+        state.set_uplp_balance(&settler, 10);
+        let err = state.escrow_settle(
+            &settler,
+            "no-such",
+            1,
+            1,
+            OUTCOME_ACCEPT,
+            AddressBindings {
+                sender: "a".into(),
+                receiver: "b".into(),
+                node: "n".into(),
+                treasury: "treasury".into(),
+                burn: "burn".into(),
+            },
+            "sh",
+            None,
+        );
+        assert!(err.is_err());
+        assert_eq!(state.get_uplp_balance(&settler), 10);
+        assert_eq!(state.get_balance(&settler), 100);
     }
 }

@@ -29,6 +29,7 @@ pub mod block_proposal_cli;
 pub mod block_cycle;
 pub mod consensus_cli;
 pub mod core_rpc;
+pub mod rpc_security;
 pub mod kernel;
 pub mod dag;
 

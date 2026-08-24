@@ -91,4 +91,6 @@ pub enum EscrowError {
     CreatorMismatch,
     #[error("replay: settle_tx already set")]
     Replay,
+    #[error("unauthorized settler for outcome {0}")]
+    UnauthorizedSettler(String),
 }

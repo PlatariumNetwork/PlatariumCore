@@ -43,30 +43,27 @@ pub fn sign_message(private_key: &SecretKey, message: &impl serde::Serialize) ->
     let msg = Message::from_digest_slice(&hash)
         .map_err(|e| PlatariumError::Signature(format!("Invalid message hash: {}", e)))?;
     
-    // Sign
-    let signature = secp.sign_ecdsa(&msg, private_key);
+    // Sign (libsecp256k1 already produces low-S; ensure_low_s keeps the contract explicit)
+    let signature = ensure_low_s(&secp.sign_ecdsa(&msg, private_key))?;
     
     // Get public key
     let public_key = PublicKey::from_secret_key(&secp, private_key);
     
-    // Extract r and s values
+    // Extract r and s values from canonical low-S signature
     let sig_bytes = signature.serialize_compact();
     let r_hex = hex::encode(&sig_bytes[..32]);
     let s_hex = hex::encode(&sig_bytes[32..]);
-    
-    // Ensure low-S (canonical form)
-    let signature_low_s = ensure_low_s(&signature)?;
     
     Ok(SignatureComponents {
         r: format!("{:0>64}", r_hex),
         s: format!("{:0>64}", s_hex),
         pub_key: hex::encode(public_key.serialize()),
-        der: signature_low_s.serialize_der().to_vec(),
-        signature_compact: format!("{}{}", hex::encode(signature_low_s.serialize_compact()), "01"),
+        der: signature.serialize_der().to_vec(),
+        signature_compact: format!("{}{}", hex::encode(sig_bytes), "01"),
     })
 }
 
-/// Verifies a signature
+/// Verifies a signature. Rejects non-canonical high-S signatures (L1 malleability hygiene).
 pub fn verify_signature(
     message: &impl serde::Serialize,
     signature_hex: &str,
@@ -94,6 +91,10 @@ pub fn verify_signature(
         Signature::from_der(&sig_bytes)
             .map_err(|e| PlatariumError::Signature(format!("Invalid DER signature: {}", e)))?
     };
+
+    if !is_low_s(&signature) {
+        return Ok(false);
+    }
     
     // Parse public key
     let pub_key_bytes = hex::decode(pub_key_hex)
@@ -106,11 +107,18 @@ pub fn verify_signature(
     Ok(secp.verify_ecdsa(&msg, &signature, &pub_key).is_ok())
 }
 
-/// Ensures signature is in low-S (canonical) form
+/// Returns true if `signature` is already in canonical low-S form.
+fn is_low_s(signature: &Signature) -> bool {
+    let mut normalized = *signature;
+    normalized.normalize_s();
+    normalized.serialize_compact() == signature.serialize_compact()
+}
+
+/// Ensures signature is in low-S (canonical) form.
 fn ensure_low_s(signature: &Signature) -> Result<Signature> {
-    // secp256k1 library's sign_ecdsa already ensures low-S
-    // Return as-is
-    Ok(*signature)
+    let mut sig = *signature;
+    sig.normalize_s();
+    Ok(sig)
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +152,87 @@ mod tests {
         
         let verified = verify_signature(&message, &sig_components.signature_compact[..128], &sig_components.pub_key).unwrap();
         assert!(verified);
+    }
+
+    #[test]
+    fn l1_reject_high_s_signature() {
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&[2; 32]).unwrap();
+        let message = serde_json::json!({"l1": "high-s"});
+        let signed = sign_message(&secret_key, &message).unwrap();
+
+        let compact = hex::decode(&signed.signature_compact[..128]).unwrap();
+        let compact_arr: [u8; 64] = compact.as_slice().try_into().unwrap();
+        let sig = Signature::from_compact(&compact_arr).unwrap();
+        assert!(is_low_s(&sig));
+
+        // Construct high-S twin: S' = n - S (same R).
+        let mut high = sig;
+        let mut bytes = high.serialize_compact();
+        const N: [u8; 32] = [
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C,
+            0xD0, 0x36, 0x41, 0x41,
+        ];
+        let s = bytes[32..].to_vec();
+        let mut s_high = [0u8; 32];
+        let mut borrow = 0i16;
+        for i in (0..32).rev() {
+            let diff = N[i] as i16 - s[i] as i16 - borrow;
+            if diff < 0 {
+                s_high[i] = (diff + 256) as u8;
+                borrow = 1;
+            } else {
+                s_high[i] = diff as u8;
+                borrow = 0;
+            }
+        }
+        bytes[32..].copy_from_slice(&s_high);
+        high = Signature::from_compact(&bytes).unwrap();
+        assert!(!is_low_s(&high), "constructed signature must be high-S");
+
+        let high_hex = hex::encode(high.serialize_compact());
+        let pub_key = signed.pub_key;
+        // Explicit policy: reject high-S even if some verifiers would accept malleable form.
+        assert!(
+            !verify_signature(&message, &high_hex, &pub_key).unwrap(),
+            "verify_signature must reject high-S"
+        );
+        assert!(verify_signature(&message, &signed.signature_compact[..128], &pub_key).unwrap());
+        let _ = secp;
+    }
+
+    #[test]
+    fn l1_ensure_low_s_normalizes() {
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&[3; 32]).unwrap();
+        let message = serde_json::json!({"l1": "normalize"});
+        let signed = sign_message(&secret_key, &message).unwrap();
+        let compact = hex::decode(&signed.signature_compact[..128]).unwrap();
+        let mut bytes: [u8; 64] = compact.try_into().unwrap();
+        const N: [u8; 32] = [
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C,
+            0xD0, 0x36, 0x41, 0x41,
+        ];
+        let s = bytes[32..].to_vec();
+        let mut s_high = [0u8; 32];
+        let mut borrow = 0i16;
+        for i in (0..32).rev() {
+            let diff = N[i] as i16 - s[i] as i16 - borrow;
+            if diff < 0 {
+                s_high[i] = (diff + 256) as u8;
+                borrow = 1;
+            } else {
+                s_high[i] = diff as u8;
+                borrow = 0;
+            }
+        }
+        bytes[32..].copy_from_slice(&s_high);
+        let high = Signature::from_compact(&bytes).unwrap();
+        let low = ensure_low_s(&high).unwrap();
+        assert!(is_low_s(&low));
+        let _ = secp; // silence if unused in future edits
     }
 }
 

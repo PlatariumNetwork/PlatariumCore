@@ -11,7 +11,9 @@ pub mod modules;
 pub use mnemonic::{generate_mnemonic, validate_mnemonic, CHARACTER_SET};
 pub use key_generator::{KeyGenerator, KeyPair, DerivationPaths, generate_alphanumeric_part};
 pub use utils::{derive_signature_seed_from_master_seed, bn_to_hex32};
-pub use signer::{sign_with_both_keys, DualSignature, SignatureWithType};
+pub use signer::{
+    sign_with_both_keys, signing_address_from_mnemonic, DualSignature, SignatureWithType,
+};
 pub use signature::{verify_signature, hash_message, sign_message, normalize_signature_hex, SignatureComponents};
 pub use utils::verify_correlation;
 pub use error::{PlatariumError, Result};
@@ -19,7 +21,9 @@ pub use error::{PlatariumError, Result};
 // Core API exports
 pub use core::{Core, TxHash};
 pub use core::asset::Asset;
-pub use core::transaction::Transaction;
+pub use core::transaction::{
+    Transaction, TransactionValidationError, address_pubkey_hex, pubkey_binds_to_from, MIN_FEE_UPLP,
+};
 pub use core::state::{State, Address, StateSnapshot, SnapshotableState, TREASURY_ADDRESS};
 pub use modules::escrow::{
     Escrow, EscrowRules, EscrowStatus, RuleShare, TX_KIND_ESCROW_CANCEL, TX_KIND_ESCROW_LOCK,
@@ -95,9 +99,11 @@ pub use core::confirmation_layer::{
     L1_CONFIRM_THRESHOLD_PCT,
     verify_tx_for_l1,
     process_l1_confirmation,
+    process_l1_confirmation_signed,
     confirm_transaction_l1,
     apply_l1_penalties,
     ConfirmationError,
+    SignedL1Vote,
 };
 pub use core::block_assembly::{
     Block,

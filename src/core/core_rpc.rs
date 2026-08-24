@@ -1,8 +1,8 @@
 //! JSON-RPC 2.0 server for Gateway native Core binding.
 //! Newline-delimited JSON over TCP or Unix domain socket.
 //!
-//! Requests are serialized with a process-wide mutex so state-file and RocksDB
-//! mutations from concurrent connections cannot race.
+//! State-mutating methods take a per-`state_file` mutex; other methods share a meta lock (M5).
+//! Public ping/handshake skip locking. Poisoned locks fail closed unless recover env is set.
 
 use crate::core::asset::Asset;
 use crate::core::block_cycle::block_cycle_json;
@@ -27,15 +27,65 @@ use crate::{
     generate_alphanumeric_part, generate_mnemonic, validate_mnemonic, verify_signature, KeyGenerator,
 };
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
-fn dispatch_lock() -> &'static Mutex<()> {
+fn state_path_locks() -> &'static Mutex<HashMap<String, Arc<Mutex<()>>>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+    LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn meta_dispatch_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn lock_or_poison(m: &Mutex<()>) -> Result<std::sync::MutexGuard<'_, ()>> {
+    match m.lock() {
+        Ok(g) => Ok(g),
+        Err(poisoned) if crate::core::rpc_security::rpc_poison_recover_allowed() => {
+            Ok(poisoned.into_inner())
+        }
+        Err(_) => Err(PlatariumError::State(
+            "RPC dispatch lock poisoned (set PLATARIUM_CORE_RPC_POISON_RECOVER=1 to override)"
+                .into(),
+        )),
+    }
+}
+
+fn with_dispatch_lock<R>(method: &str, params: &Value, f: impl FnOnce() -> R) -> Result<R> {
+    if method == "ping" || method == "handshake" {
+        return Ok(f());
+    }
+    if let Some(path) = params
+        .get("state_file")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        let arc = {
+            let mut map = match state_path_locks().lock() {
+                Ok(g) => g,
+                Err(_) if crate::core::rpc_security::rpc_poison_recover_allowed() => {
+                    state_path_locks()
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                }
+                Err(_) => {
+                    return Err(PlatariumError::State("RPC state-lock map poisoned".into()));
+                }
+            };
+            map.entry(path.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _g = lock_or_poison(&arc)?;
+        return Ok(f());
+    }
+    let _g = lock_or_poison(meta_dispatch_lock())?;
+    Ok(f())
 }
 
 fn param_str(params: &Value, key: &str) -> Result<String> {
@@ -100,6 +150,18 @@ fn param_opt_str(params: &Value, key: &str) -> Option<String> {
 pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
     match method {
         "ping" => Ok(json!({"ok": true, "service": "platarium-core-rpc", "version": "1.3.0"}).to_string()),
+        "handshake" => {
+            // H11: version + auth-aware hello (Gateway must not treat bare ping as full trust).
+            Ok(json!({
+                "ok": true,
+                "service": "platarium-core-rpc",
+                "version": "1.3.0",
+                "protocol": 2,
+                "remote_sign": crate::core::rpc_security::remote_sign_allowed(),
+                "testnet": crate::core::rpc_security::server_testnet_enabled(),
+            })
+            .to_string())
+        }
 
         "block_cycle" => block_cycle_json(params),
 
@@ -155,7 +217,15 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
 
         "kernel_commit_diff" => {
             use crate::core::kernel::{commit_state_diff, StateDiff};
+            use crate::core::rpc_security::external_kernel_commit_allowed;
+            use crate::core::state_file::load_state_file;
             use crate::storage::engine::StateFileStorageEngine;
+            if !external_kernel_commit_allowed() {
+                return Err(PlatariumError::State(
+                    "kernel_commit_diff disabled; use kernel_apply_batch (set PLATARIUM_CORE_ALLOW_EXTERNAL_COMMIT=1 only for recovery)"
+                        .into(),
+                ));
+            }
             let path = param_str(params, "state_file")?;
             let diff_val = params
                 .get("diff")
@@ -163,12 +233,90 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
                 .ok_or_else(|| PlatariumError::State("missing param diff".into()))?;
             let diff: StateDiff = serde_json::from_value(diff_val)
                 .map_err(|e| PlatariumError::State(format!("invalid StateDiff: {}", e)))?;
+            // Require pre_state_root to match live state before applying external diff.
+            let live = load_state_file(Path::new(&path))?;
+            let live_root = live.snapshot().compute_state_root();
+            match &diff.pre_state_root {
+                Some(pre) if pre == &live_root => {}
+                Some(_) => {
+                    return Err(PlatariumError::State(
+                        "kernel_commit_diff pre_state_root mismatch".into(),
+                    ));
+                }
+                None => {
+                    return Err(PlatariumError::State(
+                        "kernel_commit_diff requires pre_state_root".into(),
+                    ));
+                }
+            }
             let mut eng = StateFileStorageEngine::open(Path::new(&path))?;
             let res = commit_state_diff(&mut eng, &diff)?;
             Ok(serde_json::to_string(&res).map_err(|e| PlatariumError::State(e.to_string()))?)
         }
 
+        "kernel_apply_batch" => {
+            use crate::core::kernel::{
+                commit_state_diff, execute_ordered_batch, ExecuteOptions, OrderedBatch,
+            };
+            use crate::core::state_file::load_state_file;
+            use crate::core::transaction::Transaction;
+            use crate::storage::engine::StateFileStorageEngine;
+            let path = param_str(params, "state_file")?;
+            let parallel = param_bool(params, "parallel");
+            let batch_val = params
+                .get("batch")
+                .cloned()
+                .ok_or_else(|| PlatariumError::State("missing param batch".into()))?;
+            let batch_id = batch_val
+                .get("batch_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("batch")
+                .to_string();
+            let height = batch_val.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+            let txs_val = batch_val
+                .get("transactions")
+                .cloned()
+                .ok_or_else(|| PlatariumError::State("batch.transactions required".into()))?;
+            let mut transactions = Vec::new();
+            if let Some(arr) = txs_val.as_array() {
+                for item in arr {
+                    let tx = if let Some(s) = item.as_str() {
+                        Transaction::from_gateway_json(s)?
+                    } else {
+                        Transaction::from_gateway_json(&item.to_string())?
+                    };
+                    transactions.push(tx);
+                }
+            } else {
+                return Err(PlatariumError::State(
+                    "batch.transactions must be an array".into(),
+                ));
+            }
+            let batch = OrderedBatch::new(batch_id, height, transactions)?;
+            let state = load_state_file(Path::new(&path))?;
+            let out = execute_ordered_batch(
+                &state,
+                &batch,
+                ExecuteOptions { parallel },
+            )?;
+            let live_root = state.snapshot().compute_state_root();
+            if out.diff.pre_state_root.as_ref() != Some(&live_root) {
+                return Err(PlatariumError::State(
+                    "kernel_apply_batch pre_state_root mismatch".into(),
+                ));
+            }
+            let mut eng = StateFileStorageEngine::open(Path::new(&path))?;
+            let res = commit_state_diff(&mut eng, &out.diff)?;
+            Ok(serde_json::to_string(&res).map_err(|e| PlatariumError::State(e.to_string()))?)
+        }
+
         "dag_reset" => {
+            if !crate::core::rpc_security::dag_reset_allowed() {
+                return Err(PlatariumError::State(
+                    "dag_reset disabled (set PLATARIUM_DAG_ALLOW_RESET=1 only for local recovery)"
+                        .into(),
+                ));
+            }
             crate::core::dag::reset_global_dag_store();
             Ok(json!({"ok": true}).to_string())
         }
@@ -203,7 +351,21 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
                         .collect()
                 })
                 .unwrap_or_default();
-            let vertex = DagVertex::new(round, author, parents, tx_digests);
+            let mut vertex = DagVertex::new(round, author, parents, tx_digests);
+            vertex.author_pub = v
+                .get("author_pub")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            vertex.author_sig = v
+                .get("author_sig")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            // H4: require author signature unless PLATARIUM_DAG_ALLOW_UNSIGNED=1.
+            if !crate::core::rpc_security::dag_unsigned_allowed() {
+                vertex
+                    .verify_author_signature()
+                    .map_err(PlatariumError::State)?;
+            }
             let mut store = global_dag_store()
                 .lock()
                 .map_err(|_| PlatariumError::State("dag store lock poisoned".into()))?;
@@ -232,7 +394,6 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
                 .get("round")
                 .and_then(|v| v.as_u64())
                 .ok_or_else(|| PlatariumError::State("missing param round".into()))?;
-            let f = params.get("f").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
             let authors: Vec<String> = params
                 .get("committee")
                 .and_then(|v| v.as_array())
@@ -242,7 +403,9 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
                         .collect()
                 })
                 .unwrap_or_default();
-            let committee = CommitteeConfig { authors, f };
+            // H4: never trust client-supplied f — derive from committee size.
+            let committee =
+                CommitteeConfig::from_authors(authors).map_err(PlatariumError::State)?;
             let store = global_dag_store()
                 .lock()
                 .map_err(|_| PlatariumError::State("dag store lock poisoned".into()))?;
@@ -464,16 +627,9 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
                         .collect()
                 })
                 .unwrap_or_default();
-            let committee = if let Some(f) = params.get("f").and_then(|v| v.as_u64()) {
-                let c = CommitteeConfig {
-                    authors,
-                    f: f as usize,
-                };
-                c.validate().map_err(PlatariumError::State)?;
-                c
-            } else {
-                CommitteeConfig::from_authors(authors).map_err(PlatariumError::State)?
-            };
+            // H4: ignore client f — always derive quorum from committee size.
+            let committee =
+                CommitteeConfig::from_authors(authors).map_err(PlatariumError::State)?;
             let genesis_id = params
                 .get("genesis_id")
                 .and_then(|v| v.as_str())
@@ -713,12 +869,16 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
             let path = param_opt_str(params, "path");
             let key_gen = KeyGenerator::new(seed_index, None, None, path.clone())?;
             let keys = key_gen.restore_keys(&mnemonic, &alphanumeric_part, seed_index, path)?;
+            // C1: wallet address must be the HKDF main signing pubkey (same as sign_transaction).
+            let signing_addr =
+                crate::signer::signing_address_from_mnemonic(&mnemonic, &alphanumeric_part)?;
             Ok(json!({
-                "publicKey": keys.public_key,
+                "publicKey": signing_addr,
                 "privateKey": keys.private_key,
                 "signatureKey": keys.signature_key,
                 "derivationPath": keys.derivation_paths.main_path,
                 "alphanumeric": keys.alphanumeric_part,
+                "bip32PublicKey": keys.public_key,
             })
             .to_string())
         }
@@ -759,7 +919,7 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
 
         "sign_transaction" => {
             // Optional escrow fields must be included in the signed hash (matches Transaction::compute_hash).
-            let from = param_str(params, "from")?;
+            let _from_param = param_str(params, "from")?; // accepted for API compat; overwritten by signing address
             let to = param_str(params, "to")?;
             let asset = param_opt_str(params, "asset").unwrap_or_else(|| "PLP".to_string());
             let amount = param_u64(params, "amount")?;
@@ -790,6 +950,9 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
             if !validate_mnemonic(&mnemonic) {
                 return Err(PlatariumError::State("Invalid mnemonic phrase".into()));
             }
+            // C1: `from` must bind to the HKDF main signing key (not BIP32 generate_keys pubkey).
+            let from = crate::signer::signing_address_from_mnemonic(&mnemonic, &alphanumeric)?;
+            let _ = _from_param;
             let reads_vec: Vec<String> = serde_json::from_str(&reads)
                 .map_err(|e| PlatariumError::State(format!("invalid reads JSON: {}", e)))?;
             let writes_vec: Vec<String> = serde_json::from_str(&writes)
@@ -941,9 +1104,20 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
 }
 
 pub fn handle_rpc_line(line: &str) -> String {
-    let _guard = dispatch_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    if line.len() > crate::core::rpc_security::MAX_RPC_LINE_BYTES {
+        return json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": {
+                "code": -32600,
+                "message": format!(
+                    "request too large (max {} bytes)",
+                    crate::core::rpc_security::MAX_RPC_LINE_BYTES
+                )
+            }
+        })
+        .to_string();
+    }
 
     let req: Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -960,6 +1134,10 @@ pub fn handle_rpc_line(line: &str) -> String {
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = req.get("params").cloned().unwrap_or(json!({}));
+    let auth_token = req
+        .get("auth_token")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("auth_token").and_then(|v| v.as_str()));
 
     if method.is_empty() {
         return json!({
@@ -970,7 +1148,28 @@ pub fn handle_rpc_line(line: &str) -> String {
         .to_string();
     }
 
-    match dispatch_rpc(method, &params) {
+    if let Err(e) = crate::core::rpc_security::authorize_rpc_method(method, auth_token) {
+        return json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": -32001, "message": e.to_string()}
+        })
+        .to_string();
+    }
+
+    let dispatched = match with_dispatch_lock(method, &params, || dispatch_rpc(method, &params)) {
+        Ok(inner) => inner,
+        Err(e) => {
+            return json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": -32000, "message": e.to_string()}
+            })
+            .to_string();
+        }
+    };
+
+    match dispatched {
         Ok(result_str) => {
             let result: Value =
                 serde_json::from_str(&result_str).unwrap_or(Value::String(result_str));
@@ -1000,6 +1199,23 @@ fn serve_connection<S: std::io::Read + Write + Send + 'static>(stream: S) {
                 if line.trim().is_empty() {
                     continue;
                 }
+                // Cap before full parse when BufRead already buffered past limit (M2).
+                if line.len() > crate::core::rpc_security::MAX_RPC_LINE_BYTES {
+                    let err = json!({
+                        "jsonrpc": "2.0",
+                        "id": null,
+                        "error": {
+                            "code": -32600,
+                            "message": format!(
+                                "request too large (max {} bytes)",
+                                crate::core::rpc_security::MAX_RPC_LINE_BYTES
+                            )
+                        }
+                    })
+                    .to_string();
+                    let _ = writeln!(reader.get_mut(), "{}", err);
+                    break;
+                }
                 let response = handle_rpc_line(&line);
                 if writeln!(reader.get_mut(), "{}", response).is_err() {
                     break;
@@ -1015,10 +1231,20 @@ pub fn run_serve(listen: &str) -> Result<()> {
     if let Some(path) = listen.strip_prefix("unix:") {
         #[cfg(unix)]
         {
+            use std::os::unix::fs::PermissionsExt;
             use std::os::unix::net::UnixListener;
             let _ = std::fs::remove_file(path);
+            if let Some(parent) = Path::new(path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        PlatariumError::State(format!("unix sock dir {}: {}", parent.display(), e))
+                    })?;
+                }
+            }
             let listener = UnixListener::bind(path)
                 .map_err(|e| PlatariumError::State(format!("unix bind {}: {}", path, e)))?;
+            // C2: owner-only socket permissions.
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
             eprintln!("[core-rpc] listening on unix:{}", path);
             for stream in listener.incoming() {
                 match stream {

@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 pub type AuthorId = String;
 pub type VertexId = String;
 
-/// One Narwhal-style DAG vertex (unsigned in v0).
+/// One Narwhal-style DAG vertex.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DagVertex {
     pub id: VertexId,
@@ -15,6 +15,12 @@ pub struct DagVertex {
     pub author: AuthorId,
     pub parents: Vec<VertexId>,
     pub tx_digests: Vec<String>,
+    /// Author compressed pubkey hex (H4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_pub: Option<String>,
+    /// ECDSA signature over vertex id / body (H4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_sig: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +69,8 @@ impl DagVertex {
             author,
             parents,
             tx_digests,
+            author_pub: None,
+            author_sig: None,
         }
     }
 
@@ -89,7 +97,32 @@ impl DagVertex {
             author,
             parents,
             tx_digests,
+            author_pub: None,
+            author_sig: None,
         })
+    }
+
+    /// Verify author ECDSA signature over vertex id (H4).
+    pub fn verify_author_signature(&self) -> Result<(), String> {
+        let (Some(pub_key), Some(sig)) = (&self.author_pub, &self.author_sig) else {
+            return Err("dag: missing author_pub/author_sig".into());
+        };
+        #[derive(Serialize)]
+        struct SigBody<'a> {
+            id: &'a str,
+            author: &'a str,
+            round: u64,
+        }
+        let body = SigBody {
+            id: &self.id,
+            author: &self.author,
+            round: self.round,
+        };
+        match crate::signature::verify_signature(&body, sig, pub_key) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("dag: invalid author signature".into()),
+            Err(e) => Err(format!("dag: author signature error: {e}")),
+        }
     }
 
     /// Genesis vertex: round 0, empty parents/payloads.

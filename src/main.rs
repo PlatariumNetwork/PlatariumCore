@@ -546,12 +546,20 @@ fn handle_generate_keys(
     
     // Restore keys from mnemonic
     let keys = key_gen.restore_keys(&mnemonic, &alphanumeric_part, seed_index, path)?;
-    
-    println!("Public Key: {}", keys.public_key);
-    println!("Private Key: {}", keys.private_key);
-    println!("Signature Key: {}", keys.signature_key);
-    println!("Derivation Path: {}", keys.derivation_paths.main_path);
-    println!("Alphanumeric: {}", keys.alphanumeric_part);
+    // M4: JSON-only contract (same shape as generate_keys RPC).
+    let signing_addr =
+        platarium_core::signer::signing_address_from_mnemonic(&mnemonic, &alphanumeric_part)?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "publicKey": signing_addr,
+            "privateKey": keys.private_key,
+            "signatureKey": keys.signature_key,
+            "derivationPath": keys.derivation_paths.main_path,
+            "alphanumeric": keys.alphanumeric_part,
+            "bip32PublicKey": keys.public_key,
+        })
+    );
     
     Ok(())
 }
@@ -603,15 +611,10 @@ fn handle_verify_signature(
     let message: serde_json::Value = serde_json::from_str(&message_str)
         .map_err(|e| format!("Invalid JSON message: {}", e))?;
 
-    // Verify signature
+    // Verify signature — M4: JSON-only stdout (same as verify_signature RPC).
     let verified = verify_signature(&message, &signature, &pubkey)?;
-    
-    if verified {
-        println!("Verified: true");
-        println!("Signature is valid.");
-    } else {
-        println!("Verified: false");
-        println!("Signature is invalid.");
+    println!("{}", serde_json::json!({ "verified": verified }));
+    if !verified {
         process::exit(1);
     }
     
@@ -696,14 +699,42 @@ fn handle_state_root(state_file: String) -> std::result::Result<(), Box<dyn std:
 }
 
 /// CLI JSON args may be inline or `@/path/to/file` (Gateway spills oversized argv past ARG_MAX).
+/// H11: `@path` only allowed under spill allowlist (temp dir / PLATARIUM_CLI_SPILL_DIR).
 fn resolve_cli_json_arg(s: &str) -> std::result::Result<String, Box<dyn std::error::Error>> {
     let t = s.trim();
     if let Some(path) = t.strip_prefix('@') {
-        let data = std::fs::read_to_string(path)
-            .map_err(|e| format!("read CLI arg file {path}: {e}"))?;
+        let p = std::path::Path::new(path);
+        let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        if !cli_spill_path_allowed(&canon) {
+            return Err(format!(
+                "CLI @path refused (not under spill allowlist): {}",
+                canon.display()
+            )
+            .into());
+        }
+        let data = std::fs::read_to_string(&canon)
+            .map_err(|e| format!("read CLI arg file {}: {e}", canon.display()))?;
         return Ok(data);
     }
     Ok(s.to_string())
+}
+
+fn cli_spill_path_allowed(path: &std::path::Path) -> bool {
+    let mut allowed: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(d) = std::env::var("PLATARIUM_CLI_SPILL_DIR") {
+        let p = std::path::PathBuf::from(d);
+        if let Ok(c) = std::fs::canonicalize(&p) {
+            allowed.push(c);
+        } else {
+            allowed.push(p);
+        }
+    }
+    if let Ok(tmp) = std::env::temp_dir().canonicalize() {
+        allowed.push(tmp);
+    } else {
+        allowed.push(std::env::temp_dir());
+    }
+    allowed.iter().any(|root| path.starts_with(root))
 }
 
 fn handle_l1_verify_txs(state_file: String, txs: String) -> std::result::Result<(), Box<dyn std::error::Error>> {

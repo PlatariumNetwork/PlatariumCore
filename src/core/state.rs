@@ -109,10 +109,30 @@ impl StateSnapshot {
         v
     }
 
-    /// Computes the deterministic state root for the block header from sorted balances and nonces.
+    /// Computes the deterministic state root from all asset balances, μPLP, nonces, and escrows (H5).
     pub fn compute_state_root(&self) -> String {
         let mut hasher = Sha256::new();
-        for (addr, bal) in self.get_all_balances() {
+        // All asset balances (PLP + tokens), sorted by (address, asset).
+        let mut assets: Vec<_> = self
+            .asset_balances
+            .iter()
+            .map(|((addr, asset), bal)| (addr.clone(), asset.clone(), *bal))
+            .collect();
+        assets.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        for (addr, asset, bal) in assets {
+            hasher.update(addr.as_bytes());
+            hasher.update(asset.as_bytes());
+            hasher.update(bal.to_le_bytes());
+        }
+        // μPLP fee balances
+        let mut uplp: Vec<_> = self
+            .uplp_balances
+            .iter()
+            .map(|(a, b)| (a.clone(), *b))
+            .collect();
+        uplp.sort_by(|a, b| a.0.cmp(&b.0));
+        for (addr, bal) in uplp {
+            hasher.update(b"uplp:");
             hasher.update(addr.as_bytes());
             hasher.update(bal.to_le_bytes());
         }
@@ -615,6 +635,7 @@ impl State {
     }
 
     /// Generic escrow_lock.
+    /// Validates escrow id uniqueness before debiting so a failed lock cannot burn fees (C6).
     pub fn escrow_lock(
         &self,
         creator: &Address,
@@ -632,12 +653,6 @@ impl State {
         if escrow_id.is_empty() || amount == 0 {
             return Err(StateError::Escrow(EscrowError::InvalidRules("empty id/amount".into()).to_string()).into());
         }
-        {
-            let ce = self.contact_escrows.read().unwrap();
-            if ce.contains_key(escrow_id) {
-                return Err(StateError::Escrow(EscrowError::AlreadyExists.to_string()).into());
-            }
-        }
         let rules = if purpose == PURPOSE_CONTACT {
             contact_default_rules()
         } else {
@@ -648,10 +663,23 @@ impl State {
             .map_err(|e| StateError::Escrow(e.to_string()))?;
         let rules_hash = rules.hash_hex();
 
+        // Pre-check under write lock before any balance movement.
+        {
+            let ce = self.contact_escrows.write().unwrap();
+            if ce.contains_key(escrow_id) {
+                return Err(StateError::Escrow(EscrowError::AlreadyExists.to_string()).into());
+            }
+        }
+
         self.debit_for_escrow_lock(creator, asset, amount, fee_uplp, expected_nonce)?;
 
         let mut ce = self.contact_escrows.write().unwrap();
-        Arc::make_mut(&mut ce).insert(
+        let map = Arc::make_mut(&mut ce);
+        if map.contains_key(escrow_id) {
+            // Concurrent lock won the race — do not overwrite; fee already taken (rare).
+            return Err(StateError::Escrow(EscrowError::AlreadyExists.to_string()).into());
+        }
+        map.insert(
             escrow_id.to_string(),
             Escrow {
                 escrow_id: escrow_id.to_string(),
@@ -696,7 +724,49 @@ impl State {
         )
     }
 
+    /// Authorize settler for an escrow outcome (C5).
+    /// - treasury: always allowed (protocol)
+    /// - accept / reject: beneficiary if set, else creator (legacy empty beneficiary)
+    /// - cancel: creator only
+    /// - timeout: creator or treasury
+    /// - other keys: creator or beneficiary
+    fn assert_settler_authorized(
+        settler: &Address,
+        entry: &Escrow,
+        outcome_key: &str,
+    ) -> Result<()> {
+        if settler.as_str() == TREASURY_ADDRESS {
+            return Ok(());
+        }
+        let ok = match outcome_key {
+            "accept" => {
+                if entry.beneficiary.is_empty() {
+                    settler == &entry.creator
+                } else {
+                    settler == &entry.beneficiary
+                }
+            }
+            // Beneficiary rejects, or creator cancels via reject-rules fallback.
+            "reject" => {
+                settler == &entry.creator
+                    || (!entry.beneficiary.is_empty() && settler == &entry.beneficiary)
+            }
+            "cancel" => settler == &entry.creator,
+            "timeout" => settler == &entry.creator,
+            _ => {
+                settler == &entry.creator
+                    || (!entry.beneficiary.is_empty() && settler == &entry.beneficiary)
+            }
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(StateError::Escrow(EscrowError::UnauthorizedSettler(outcome_key.into()).to_string()).into())
+        }
+    }
+
     /// Generic escrow_settle using rules engine.
+    /// Validates escrow + settler auth before debiting fee (C5, C6).
     pub fn escrow_settle(
         &self,
         settler: &Address,
@@ -708,21 +778,62 @@ impl State {
         settle_tx_hash: &str,
         expected_nonce: Option<u64>,
     ) -> Result<()> {
-        // Settler fee
+        // Phase 1: validate without moving balances.
+        let bind = {
+            let ce = self.contact_escrows.read().unwrap();
+            let entry = ce
+                .get(escrow_id)
+                .ok_or_else(|| StateError::Escrow(EscrowError::NotFound.to_string()))?;
+            Self::assert_settler_authorized(settler, entry, outcome_key)?;
+            if entry.status != EscrowStatus::Locked {
+                return Err(StateError::Escrow(
+                    EscrowError::InvalidStatus(entry.status).to_string(),
+                )
+                .into());
+            }
+            if !entry.settle_tx_hash.is_empty() {
+                return Err(StateError::Escrow(EscrowError::Replay.to_string()).into());
+            }
+            if entry.amount != amount {
+                return Err(StateError::Escrow(
+                    EscrowError::AmountMismatch {
+                        locked: entry.amount,
+                        got: amount,
+                    }
+                    .to_string(),
+                )
+                .into());
+            }
+
+            let mut bind = bindings;
+            if bind.sender.is_empty() {
+                bind.sender = entry.creator.clone();
+            }
+            if bind.receiver.is_empty() {
+                bind.receiver = entry.beneficiary.clone();
+            }
+            if bind.treasury.is_empty() {
+                bind.treasury = TREASURY_ADDRESS.to_string();
+            }
+            if bind.burn.is_empty() {
+                bind.burn = "burn".to_string();
+            }
+            // Ensure rules accept this outcome before debiting.
+            apply_rules(&entry.rules, outcome_key, amount, &bind)
+                .map_err(|e| StateError::Escrow(e.to_string()))?;
+            bind
+        };
+
+        // Phase 2: debit settler fee only after validation succeeded.
         self.debit_for_escrow_lock(settler, &Asset::PLP, 0, fee_uplp, expected_nonce)?;
 
+        // Phase 3: commit escrow mutation with re-check.
         let mut ce_arc = self.contact_escrows.write().unwrap();
         let ce = Arc::make_mut(&mut ce_arc);
         let entry = ce
             .get_mut(escrow_id)
             .ok_or_else(|| StateError::Escrow(EscrowError::NotFound.to_string()))?;
-        if entry.status != EscrowStatus::Locked {
-            return Err(StateError::Escrow(
-                EscrowError::InvalidStatus(entry.status).to_string(),
-            )
-            .into());
-        }
-        if !entry.settle_tx_hash.is_empty() {
+        if entry.status != EscrowStatus::Locked || !entry.settle_tx_hash.is_empty() {
             return Err(StateError::Escrow(EscrowError::Replay.to_string()).into());
         }
         if entry.amount != amount {
@@ -735,27 +846,8 @@ impl State {
             )
             .into());
         }
-        if entry.expires_at > 0 && bindings.sender.is_empty() {
-            // expires_at checked by gateway; Core trusts settle submission
-        }
-
-        let mut bind = bindings;
-        if bind.sender.is_empty() {
-            bind.sender = entry.creator.clone();
-        }
-        if bind.receiver.is_empty() {
-            bind.receiver = entry.beneficiary.clone();
-        }
-        if bind.treasury.is_empty() {
-            bind.treasury = TREASURY_ADDRESS.to_string();
-        }
-        if bind.burn.is_empty() {
-            bind.burn = "burn".to_string();
-        }
-
         let credits = apply_rules(&entry.rules, outcome_key, amount, &bind)
             .map_err(|e| StateError::Escrow(e.to_string()))?;
-
         let new_status = match outcome_key {
             "cancel" => EscrowStatus::Cancelled,
             "timeout" => EscrowStatus::Expired,
@@ -766,9 +858,8 @@ impl State {
         entry.status = new_status;
         drop(ce_arc);
 
-        let asset = Asset::PLP;
         for (addr, amt) in credits {
-            self.credit_asset(&addr, &asset, amt);
+            self.credit_asset(&addr, &Asset::PLP, amt);
         }
         Ok(())
     }
@@ -815,6 +906,8 @@ impl State {
         let entry = self
             .get_escrow(escrow_id)
             .ok_or_else(|| StateError::Escrow(EscrowError::NotFound.to_string()))?;
+        // Refund / reject is beneficiary (or creator if no beneficiary).
+        Self::assert_settler_authorized(settler, &entry, "reject")?;
         let amount = entry.amount;
         let bindings = AddressBindings {
             sender: entry.creator.clone(),
@@ -836,10 +929,20 @@ impl State {
                 expected_nonce,
             )
         } else {
+            // Validate before debit
+            if entry.status != EscrowStatus::Locked {
+                return Err(StateError::Escrow(
+                    EscrowError::InvalidStatus(entry.status).to_string(),
+                )
+                .into());
+            }
             self.debit_for_escrow_lock(settler, &Asset::PLP, 0, fee_uplp, expected_nonce)?;
             self.credit_asset(&entry.creator, &Asset::PLP, amount);
             let mut ce = self.contact_escrows.write().unwrap();
             if let Some(e) = Arc::make_mut(&mut ce).get_mut(escrow_id) {
+                if e.status != EscrowStatus::Locked {
+                    return Err(StateError::Escrow(EscrowError::Replay.to_string()).into());
+                }
                 e.status = EscrowStatus::Refunded;
             }
             Ok(())
@@ -857,15 +960,14 @@ impl State {
         let entry = self
             .get_escrow(escrow_id)
             .ok_or_else(|| StateError::Escrow(EscrowError::NotFound.to_string()))?;
-        if entry.creator != *settler && settler.as_str() != TREASURY_ADDRESS {
-            // allow creator or protocol settler (any for now if fee paid)
-        }
+        Self::assert_settler_authorized(settler, &entry, "cancel")?;
         let amount = entry.amount;
         let key = if entry.rules.outcomes.contains_key("cancel") {
             "cancel"
         } else {
             "reject"
         };
+        // cancel auth already checked; for reject-key path still require cancel role (creator).
         let bindings = AddressBindings {
             sender: entry.creator.clone(),
             receiver: entry.beneficiary.clone(),
