@@ -248,6 +248,11 @@ pub fn state_query_json(path: &Path, address: &str, asset: &str) -> Result<Strin
     let uplp = state.get_uplp_balance(&address.to_string());
     let nonce = state.get_nonce(&address.to_string());
     let fee_spendable = state.fee_spendable_uplp(&address.to_string());
+    let tokens = state.token_balances_of(&address.to_string());
+    let xp = tokens
+        .get(&Asset::xp().as_canonical())
+        .cloned()
+        .unwrap_or_else(|| "0".to_string());
     let out = serde_json::json!({
         "address": address,
         "asset": asset_enum.as_canonical(),
@@ -255,6 +260,8 @@ pub fn state_query_json(path: &Path, address: &str, asset: &str) -> Result<Strin
         "uplp_balance": uplp.to_string(),
         "fee_spendable_uplp": fee_spendable.to_string(),
         "nonce": nonce,
+        "tokens": tokens,
+        "xp": xp,
     });
     Ok(serde_json::to_string(&out).map_err(|e| PlatariumError::State(e.to_string()))?)
 }
@@ -316,6 +323,52 @@ pub fn state_credit_json(path: &Path, address: &str, plp: u128, uplp: u128, test
             "ok": true,
             "state_root": root,
             "treasury": TREASURY_ADDRESS,
+        }))
+    })
+    .map(|v| serde_json::to_string(&v).unwrap())
+}
+
+/// Credit an accumulate-only token (Token:XP). Same testnet gates as `state_credit`.
+/// Cannot be used to mint transferable tokens or PLP.
+pub fn state_credit_token_json(
+    path: &Path,
+    address: &str,
+    asset: &str,
+    amount: u128,
+    testnet: bool,
+) -> Result<String> {
+    if !crate::core::rpc_security::server_testnet_enabled() {
+        return Err(PlatariumError::State(
+            "state-credit-token denied: set PLATARIUM_CORE_TESTNET=1 (or PLATARIUM_TESTNET=1) on the Core process"
+                .into(),
+        ));
+    }
+    if !testnet {
+        return Err(PlatariumError::State(
+            "state-credit-token requires --testnet flag".into(),
+        ));
+    }
+    if amount == 0 {
+        return Err(PlatariumError::State("state-credit-token amount must be > 0".into()));
+    }
+    let asset_enum = parse_asset(asset)?;
+    if !asset_enum.is_non_transferable() {
+        return Err(PlatariumError::State(format!(
+            "state-credit-token only mints accumulate-only assets (Token:XP), not {}",
+            asset_enum.as_canonical()
+        )));
+    }
+    with_state_file_mut(path, |state| {
+        let addr = address.to_string();
+        state.credit_asset(&addr, &asset_enum, amount);
+        let balance = state.get_asset_balance(&addr, &asset_enum);
+        let root = state.create_snapshot().compute_state_root();
+        Ok(serde_json::json!({
+            "ok": true,
+            "state_root": root,
+            "address": address,
+            "asset": asset_enum.as_canonical(),
+            "balance": balance.to_string(),
         }))
     })
     .map(|v| serde_json::to_string(&v).unwrap())

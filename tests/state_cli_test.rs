@@ -34,6 +34,26 @@ fn state_file_init_query_credit_root() {
 }
 
 #[test]
+fn state_credit_token_xp_accumulates_and_query_exposes_tokens() {
+    let _g = ENV_LOCK.lock().unwrap();
+    enable_testnet();
+    let path = temp_state_path("xp");
+    let _ = std::fs::remove_file(&path);
+    init_state_file(&path).expect("init");
+
+    state_credit_token_json(&path, "PxAlice", "Token:XP", 100, true).expect("credit1");
+    state_credit_token_json(&path, "PxAlice", "XP", 50, true).expect("credit2");
+    let query = state_query_json(&path, "PxAlice", "PLP").expect("query");
+    assert!(query.contains("\"xp\":\"150\""), "got {query}");
+    assert!(query.contains("Token:XP"), "got {query}");
+
+    let deny = state_credit_token_json(&path, "PxAlice", "USDT", 1, true).unwrap_err();
+    assert!(deny.to_string().contains("accumulate-only"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn state_validate_rejects_wrong_nonce() {
     let _g = ENV_LOCK.lock().unwrap();
     enable_testnet();

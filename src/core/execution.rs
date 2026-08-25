@@ -104,6 +104,12 @@ impl ExecutionLogic {
                 tx.nonce, current_nonce
             )));
         }
+        if tx.asset.is_non_transferable() {
+            return Err(PlatariumError::State(format!(
+                "{} is accumulate-only and cannot be transferred",
+                tx.asset.as_canonical()
+            )));
+        }
         if tx.is_contact_escrow() {
             let fee_available = state.fee_spendable_uplp(&tx.from);
             if fee_available < tx.fee_uplp {

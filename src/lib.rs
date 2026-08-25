@@ -152,6 +152,7 @@ pub use core::state_file::{
     save_state_file,
     state_apply_tx_json,
     state_credit_json,
+    state_credit_token_json,
     state_query_json,
     state_root_json,
     state_validate_tx_json,

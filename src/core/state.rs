@@ -7,7 +7,7 @@
 //! - State transitions are deterministic functions of the transaction sequence.
 //! - Balance and nonce updates follow fixed rules. Same sequence of transactions always produces the same state.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 use sha2::{Sha256, Digest};
 use crate::error::{PlatariumError, Result};
@@ -288,8 +288,22 @@ impl State {
             .saturating_add(self.get_uplp_balance(address))
     }
 
+    /// Non-PLP token balances for an address (canonical key → decimal string). Sorted.
+    pub fn token_balances_of(&self, address: &Address) -> BTreeMap<String, String> {
+        let ab = self.asset_balances.read().unwrap();
+        let plp = Asset::PLP.as_canonical();
+        let mut out = BTreeMap::new();
+        for ((addr, asset), bal) in ab.iter() {
+            if addr == address && *asset != plp && *bal > 0 {
+                out.insert(asset.clone(), bal.to_string());
+            }
+        }
+        out
+    }
+
     /// Applies a transfer: deduct fee from uplp then PLP asset; amount from asset; credit receiver and treasury.
     /// Fee is always μPLP (fraction of PLP). Order: fee, then asset transfer, then nonce (deterministic).
+    /// Token:XP is accumulate-only and cannot be transferred.
     pub fn apply_transfer(
         &self,
         from: &Address,
@@ -299,6 +313,13 @@ impl State {
         fee_uplp: u128,
         expected_nonce: Option<u64>,
     ) -> Result<()> {
+        if asset.is_non_transferable() {
+            return Err(StateError::Other(format!(
+                "{} is accumulate-only and cannot be transferred",
+                asset.as_canonical()
+            ))
+            .into());
+        }
         let treasury = TREASURY_ADDRESS.to_string();
         let k = Self::asset_key(from, asset);
 
@@ -560,6 +581,13 @@ impl State {
         fee_uplp: u128,
         expected_nonce: Option<u64>,
     ) -> Result<()> {
+        if asset.is_non_transferable() {
+            return Err(StateError::Other(format!(
+                "{} is accumulate-only and cannot be locked in escrow",
+                asset.as_canonical()
+            ))
+            .into());
+        }
         let treasury = TREASURY_ADDRESS.to_string();
         let k = Self::asset_key(from, asset);
         let mut ab_arc = self.asset_balances.write().unwrap();
@@ -652,6 +680,13 @@ impl State {
     ) -> Result<()> {
         if escrow_id.is_empty() || amount == 0 {
             return Err(StateError::Escrow(EscrowError::InvalidRules("empty id/amount".into()).to_string()).into());
+        }
+        if asset.is_non_transferable() {
+            return Err(StateError::Other(format!(
+                "{} is accumulate-only and cannot be locked in escrow",
+                asset.as_canonical()
+            ))
+            .into());
         }
         let rules = if purpose == PURPOSE_CONTACT {
             contact_default_rules()
@@ -1101,7 +1136,30 @@ mod tests {
         assert_eq!(state.get_balance(&"addr1".to_string()), 0);
         assert_eq!(state.get_nonce(&"addr1".to_string()), 0);
     }
-    
+
+    #[test]
+    fn token_xp_accumulates_and_cannot_transfer() {
+        let state = State::new();
+        let alice = "PxAlice".to_string();
+        let bob = "PxBob".to_string();
+        state.credit_asset(&alice, &Asset::xp(), 100);
+        state.credit_asset(&alice, &Asset::xp(), 50);
+        assert_eq!(state.get_asset_balance(&alice, &Asset::xp()), 150);
+        assert_eq!(
+            state.token_balances_of(&alice).get("Token:XP").map(String::as_str),
+            Some("150")
+        );
+        let err = state
+            .apply_transfer(&alice, &bob, &Asset::xp(), 10, 1, Some(0))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("accumulate-only"),
+            "unexpected: {err}"
+        );
+        assert_eq!(state.get_asset_balance(&alice, &Asset::xp()), 150);
+        assert_eq!(state.get_asset_balance(&bob, &Asset::xp()), 0);
+    }
+
     #[test]
     fn test_get_balance() {
         let state = State::new();

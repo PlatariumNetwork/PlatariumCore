@@ -149,6 +149,20 @@ enum Commands {
         testnet: bool,
     },
 
+    /// Credit accumulate-only Token:XP (testnet only). Cannot transfer this asset.
+    StateCreditToken {
+        #[arg(long)]
+        state_file: String,
+        #[arg(long)]
+        address: String,
+        #[arg(long, default_value = "Token:XP")]
+        asset: String,
+        #[arg(long)]
+        amount: u128,
+        #[arg(long)]
+        testnet: bool,
+    },
+
     /// Compute deterministic state root from state file
     StateRoot {
         #[arg(long)]
@@ -381,6 +395,13 @@ fn main() {
             uplp,
             testnet,
         } => handle_state_credit(state_file, address, plp, uplp, testnet),
+        Commands::StateCreditToken {
+            state_file,
+            address,
+            asset,
+            amount,
+            testnet,
+        } => handle_state_credit_token(state_file, address, asset, amount, testnet),
         Commands::StateRoot { state_file } => handle_state_root(state_file),
         Commands::L1VerifyTxs { state_file, txs } => handle_l1_verify_txs(state_file, txs),
         Commands::L1ProcessVotes { votes } => handle_l1_process_votes(votes),
@@ -688,6 +709,24 @@ fn handle_state_credit(
     testnet: bool,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let out = state_credit_json(std::path::Path::new(&state_file), &address, plp, uplp, testnet)?;
+    println!("{}", out);
+    Ok(())
+}
+
+fn handle_state_credit_token(
+    state_file: String,
+    address: String,
+    asset: String,
+    amount: u128,
+    testnet: bool,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let out = state_credit_token_json(
+        std::path::Path::new(&state_file),
+        &address,
+        &asset,
+        amount,
+        testnet,
+    )?;
     println!("{}", out);
     Ok(())
 }

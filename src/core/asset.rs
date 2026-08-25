@@ -13,12 +13,25 @@ pub enum Asset {
 }
 
 impl Asset {
+    /// Contributor reputation token. Accumulate-only (no transfers, purchases later).
+    pub const XP_SYMBOL: &'static str = "XP";
+
+    /// `Asset::Token("XP")` — canonical `Token:XP`.
+    pub fn xp() -> Self {
+        Asset::Token(Self::XP_SYMBOL.to_string())
+    }
+
     /// Returns a canonical string for hashing and ordering (deterministic).
     pub fn as_canonical(&self) -> String {
         match self {
             Asset::PLP => "PLP".to_string(),
             Asset::Token(s) => format!("Token:{}", s),
         }
+    }
+
+    /// Soulbound / accumulate-only: cannot move via transfer, escrow, or send.
+    pub fn is_non_transferable(&self) -> bool {
+        matches!(self, Asset::Token(s) if s.eq_ignore_ascii_case(Self::XP_SYMBOL))
     }
 }
 
@@ -47,5 +60,14 @@ mod tests {
         assert_eq!(Asset::PLP, Asset::PLP);
         assert_eq!(Asset::Token("A".to_string()), Asset::Token("A".to_string()));
         assert_ne!(Asset::PLP, Asset::Token("PLP".to_string()));
+    }
+
+    #[test]
+    fn token_xp_is_non_transferable() {
+        assert_eq!(Asset::xp().as_canonical(), "Token:XP");
+        assert!(Asset::xp().is_non_transferable());
+        assert!(Asset::Token("xp".into()).is_non_transferable());
+        assert!(!Asset::Token("USDT".into()).is_non_transferable());
+        assert!(!Asset::PLP.is_non_transferable());
     }
 }

@@ -13,7 +13,8 @@ use crate::core::consensus_cli::{
     assemble_block_json, l1_process_votes_json, l1_verify_txs_json, l2_process_votes_json,
 };
 use crate::core::state_file::{
-    init_state_file, state_apply_tx_json, state_credit_json, state_query_json, state_root_json,
+    init_state_file, state_apply_tx_json, state_credit_json, state_credit_token_json,
+    state_query_json, state_root_json,
     state_validate_tx_json,
 };
 use crate::core::transaction::Transaction;
@@ -699,6 +700,14 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
             let uplp = param_u64(params, "uplp")? as u128;
             let testnet = param_bool(params, "testnet");
             state_credit_json(Path::new(&path), &address, plp, uplp, testnet)
+        }
+        "state_credit_token" => {
+            let path = param_str(params, "state_file")?;
+            let address = param_str(params, "address")?;
+            let asset = param_opt_str(params, "asset").unwrap_or_else(|| "Token:XP".to_string());
+            let amount = param_u64(params, "amount")? as u128;
+            let testnet = param_bool(params, "testnet");
+            state_credit_token_json(Path::new(&path), &address, &asset, amount, testnet)
         }
         "state_root" => {
             let path = param_str(params, "state_file")?;
