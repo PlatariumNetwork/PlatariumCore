@@ -17,7 +17,7 @@ use std::path::Path;
 /// - `state_file` (required)
 /// - `mempool_txs` (required) — gateway mempool snapshot JSON array
 /// - `block_number`, `previous_hash`, `timestamp`, `producer_id` (required for assemble)
-/// - `auto_confirm` (bool, default true) — synthesize unanimous L1/L2 Confirm votes
+/// - `auto_confirm` (bool, default false) — synthesize L1/L2 Confirm votes (solo/test only; P0)
 /// - `apply_txs` (bool, default false) — apply L1-valid txs to state_file after assemble
 /// - `commit` (optional string) — BlockCommit JSON for RocksDB when `db_path` set
 /// - `db_path` (optional) — RocksDB path for `rocks_commit_block`
@@ -55,7 +55,7 @@ pub fn block_cycle_json(params: &Value) -> Result<String> {
     let auto_confirm = params
         .get("auto_confirm")
         .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+        .unwrap_or(false);
     let apply_txs = params
         .get("apply_txs")
         .and_then(|v| v.as_bool())
