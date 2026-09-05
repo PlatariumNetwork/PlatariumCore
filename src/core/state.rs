@@ -540,6 +540,16 @@ impl State {
         Arc::make_mut(&mut ce).insert(escrow.escrow_id.clone(), escrow);
     }
 
+    /// Replace the full escrow set (StateDiff commit path).
+    pub fn replace_all_escrows(&self, escrows: Vec<Escrow>) {
+        let mut ce = self.contact_escrows.write().unwrap();
+        let map = Arc::make_mut(&mut ce);
+        map.clear();
+        for e in escrows {
+            map.insert(e.escrow_id.clone(), e);
+        }
+    }
+
     pub fn restore_contact_escrow(&self, request_id_hash: &str, entry: ContactEscrowEntry) {
         let rules = contact_default_rules();
         let rules_hash = rules.hash_hex();
@@ -1025,7 +1035,7 @@ impl State {
     /// Applies a transaction: validate_basic, then transfer or escrow.
     pub fn apply_transaction(&self, tx: &Transaction) -> Result<()> {
         tx.validate_basic().map_err(PlatariumError::from)?;
-        let kind = tx.tx_kind.as_deref().unwrap_or("");
+        let kind = tx.effective_tx_kind().unwrap_or("");
         match kind {
             TX_KIND_ESCROW_LOCK => {
                 let rid = tx

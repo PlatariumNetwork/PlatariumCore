@@ -82,6 +82,7 @@ pub fn execute_ordered_batch(
     }
 
     let accounts = collect_account_images(&working, &touched);
+    let escrows_json = collect_escrow_images(&working);
     let post_root = working.snapshot().compute_state_root();
     let mut diff = StateDiff {
         schema_version: STATE_DIFF_SCHEMA_VERSION,
@@ -90,6 +91,7 @@ pub fn execute_ordered_batch(
         accounts,
         pre_state_root: Some(pre_root),
         post_state_root: post_root,
+        escrows_json: Some(escrows_json),
     };
     // Ensure accounts sorted
     diff.accounts.sort_by(|a, b| a.address.cmp(&b.address));
@@ -192,6 +194,16 @@ fn collect_account_images(state: &State, touched: &BTreeSet<String>) -> Vec<Acco
     }
     out.sort_by(|a, b| a.address.cmp(&b.address));
     out
+}
+
+fn collect_escrow_images(state: &State) -> Vec<String> {
+    let snap = state.snapshot();
+    let mut escrows: Vec<_> = snap.contact_escrows_arc().values().cloned().collect();
+    escrows.sort_by(|a, b| a.escrow_id.cmp(&b.escrow_id));
+    escrows
+        .iter()
+        .filter_map(|e| serde_json::to_string(e).ok())
+        .collect()
 }
 
 #[cfg(test)]

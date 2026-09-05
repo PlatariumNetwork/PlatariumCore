@@ -207,6 +207,17 @@ impl Transaction {
         )
     }
 
+    /// Canonical tx kind — maps legacy `contact_escrow_*` strings onto escrow handlers.
+    pub fn effective_tx_kind(&self) -> Option<&str> {
+        use crate::modules::escrow::types::{TX_KIND_ESCROW_LOCK, TX_KIND_ESCROW_SETTLE};
+        match self.tx_kind.as_deref() {
+            Some("contact_escrow_lock") => Some(TX_KIND_ESCROW_LOCK),
+            Some("contact_escrow_settle") => Some(TX_KIND_ESCROW_SETTLE),
+            Some(k) => Some(k),
+            None => None,
+        }
+    }
+
     /// Escrow id from `escrow_id` or legacy `request_id_hash`.
     pub fn escrow_id(&self) -> Option<&str> {
         self.escrow_id

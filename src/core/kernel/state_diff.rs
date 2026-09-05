@@ -37,6 +37,9 @@ pub struct StateDiff {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pre_state_root: Option<String>,
     pub post_state_root: String,
+    /// Full escrow records after batch execution (sorted JSON). None = do not touch escrows on commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escrows_json: Option<Vec<String>>,
 }
 
 impl StateDiff {
@@ -119,6 +122,7 @@ mod tests {
             ],
             pre_state_root: Some("pre".into()),
             post_state_root: "post".into(),
+            escrows_json: None,
         };
         let j1 = diff.to_canonical_json().unwrap();
         let j2 = diff.to_canonical_json().unwrap();

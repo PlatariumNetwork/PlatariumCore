@@ -118,7 +118,7 @@ impl ExecutionLogic {
                     tx.fee_uplp, fee_available
                 )));
             }
-            if tx.tx_kind.as_deref()
+            if tx.effective_tx_kind()
                 == Some(crate::core::contact_escrow::TX_KIND_CONTACT_ESCROW_LOCK)
             {
                 let plp_bal = state.get_asset_balance(&tx.from, &Asset::PLP);
@@ -170,7 +170,7 @@ impl ExecutionLogic {
         };
         use crate::modules::escrow::rules::AddressBindings;
         use crate::core::state::TREASURY_ADDRESS;
-        match tx.tx_kind.as_deref() {
+        match tx.effective_tx_kind() {
             Some(TX_KIND_ESCROW_LOCK) => {
                 let rid = tx.escrow_id().ok_or_else(|| {
                     PlatariumError::State("missing escrow_id".into())

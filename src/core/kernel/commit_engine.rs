@@ -36,6 +36,17 @@ pub fn commit_state_diff(storage: &mut dyn StorageEngine, diff: &StateDiff) -> R
             });
         }
     }
+    if let Some(ref escrows) = diff.escrows_json {
+        if let Err(e) = storage.apply_escrows(escrows) {
+            let _ = storage.rollback();
+            return Ok(CommitResult {
+                ok: false,
+                post_state_root: diff.post_state_root.clone(),
+                height: 0,
+                error: Some(e.to_string()),
+            });
+        }
+    }
     storage.commit_atomic()?;
     Ok(CommitResult {
         ok: true,
@@ -170,6 +181,7 @@ mod tests {
             accounts: vec![],
             pre_state_root: None,
             post_state_root: "r".into(),
+            escrows_json: None,
         };
         // commit empty still ok
         assert!(commit_state_diff(&mut mem, &diff).unwrap().ok);

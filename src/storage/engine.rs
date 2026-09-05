@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 pub trait StorageEngine {
     fn begin(&mut self) -> Result<()>;
     fn apply_accounts(&mut self, accounts: &[AccountPostImage]) -> Result<()>;
+    /// Replace escrow records when StateDiff includes `escrows_json`.
+    fn apply_escrows(&mut self, escrows_json: &[String]) -> Result<()>;
     fn commit_atomic(&mut self) -> Result<()>;
     fn rollback(&mut self) -> Result<()>;
     fn get_account(&self, address: &str) -> Option<AccountPostImage>;
@@ -68,6 +70,10 @@ impl StorageEngine for InMemoryStorageEngine {
         for a in accounts {
             staging.insert(a.address.clone(), a.clone());
         }
+        Ok(())
+    }
+
+    fn apply_escrows(&mut self, _escrows_json: &[String]) -> Result<()> {
         Ok(())
     }
 
@@ -136,6 +142,13 @@ impl StorageEngine for StateFileStorageEngine {
         Ok(())
     }
 
+    fn apply_escrows(&mut self, escrows_json: &[String]) -> Result<()> {
+        if !self.begun {
+            return Err(PlatariumError::State("StorageEngine.begin not called".into()));
+        }
+        apply_escrows_to_state(&self.state, escrows_json)
+    }
+
     fn commit_atomic(&mut self) -> Result<()> {
         if !self.begun {
             return Err(PlatariumError::State("StorageEngine.begin not called".into()));
@@ -188,6 +201,10 @@ impl StorageEngine for RocksAccountStorageEngine {
             return Err(PlatariumError::State("StorageEngine.begin not called".into()));
         }
         self.staging.extend(accounts.iter().cloned());
+        Ok(())
+    }
+
+    fn apply_escrows(&mut self, _escrows_json: &[String]) -> Result<()> {
         Ok(())
     }
 
@@ -271,6 +288,18 @@ fn apply_post_images_to_state(state: &State, accounts: &[AccountPostImage]) -> R
             state.set_asset_balance(&a.address, &Asset::Token(sym.clone()), bal);
         }
     }
+    Ok(())
+}
+
+fn apply_escrows_to_state(state: &State, escrows_json: &[String]) -> Result<()> {
+    let mut escrows = Vec::with_capacity(escrows_json.len());
+    for js in escrows_json {
+        let e: crate::modules::escrow::Escrow = serde_json::from_str(js).map_err(|e| {
+            PlatariumError::State(format!("invalid escrow json in StateDiff: {}", e))
+        })?;
+        escrows.push(e);
+    }
+    state.replace_all_escrows(escrows);
     Ok(())
 }
 
