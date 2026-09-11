@@ -195,24 +195,29 @@ impl Transaction {
         (reads_vec, writes_vec)
     }
 
+    /// True when a kind string is escrow-related (canonical, legacy, or unknown).
+    /// Used to refuse transfer fallthrough for any escrow-like label (R2-C2).
+    pub fn is_escrow_like_kind(kind: &str) -> bool {
+        kind.to_ascii_lowercase().contains("escrow")
+    }
+
     fn is_escrow_kind(&self) -> bool {
-        matches!(
-            self.tx_kind.as_deref(),
-            Some("escrow_lock")
-                | Some("escrow_settle")
-                | Some("escrow_refund")
-                | Some("escrow_cancel")
-                | Some("contact_escrow_lock")
-                | Some("contact_escrow_settle")
-        )
+        match self.tx_kind.as_deref() {
+            Some(k) if Self::is_escrow_like_kind(k) => true,
+            _ => false,
+        }
     }
 
     /// Canonical tx kind — maps legacy `contact_escrow_*` strings onto escrow handlers.
     pub fn effective_tx_kind(&self) -> Option<&str> {
-        use crate::modules::escrow::types::{TX_KIND_ESCROW_LOCK, TX_KIND_ESCROW_SETTLE};
+        use crate::modules::escrow::types::{
+            TX_KIND_ESCROW_CANCEL, TX_KIND_ESCROW_LOCK, TX_KIND_ESCROW_REFUND, TX_KIND_ESCROW_SETTLE,
+        };
         match self.tx_kind.as_deref() {
             Some("contact_escrow_lock") => Some(TX_KIND_ESCROW_LOCK),
             Some("contact_escrow_settle") => Some(TX_KIND_ESCROW_SETTLE),
+            Some("contact_escrow_refund") => Some(TX_KIND_ESCROW_REFUND),
+            Some("contact_escrow_cancel") => Some(TX_KIND_ESCROW_CANCEL),
             Some(k) => Some(k),
             None => None,
         }
@@ -1003,5 +1008,34 @@ mod tests {
         let bad = Transaction::from_gateway_json(&inj.to_string()).unwrap();
         assert!(!bad.verify_signatures().unwrap());
     }
+
+    #[test]
+    fn r2_c2_effective_tx_kind_maps_legacy_contact_escrow() {
+        use crate::modules::escrow::types::{TX_KIND_ESCROW_LOCK, TX_KIND_ESCROW_SETTLE};
+
+        let mut lock = Transaction::new(
+            "from".into(),
+            "to".into(),
+            Asset::PLP,
+            1,
+            1,
+            0,
+            HashSet::new(),
+            HashSet::new(),
+            "s1".into(),
+            "s2".into(),
+        )
+        .unwrap();
+        lock.tx_kind = Some("contact_escrow_lock".into());
+        assert!(lock.is_escrow());
+        assert_eq!(lock.effective_tx_kind(), Some(TX_KIND_ESCROW_LOCK));
+
+        let mut settle = lock.clone();
+        settle.tx_kind = Some("contact_escrow_settle".into());
+        assert_eq!(settle.effective_tx_kind(), Some(TX_KIND_ESCROW_SETTLE));
+
+        assert!(Transaction::is_escrow_like_kind("contact_escrow_lock"));
+        assert!(Transaction::is_escrow_like_kind("Escrow_Weird"));
+        assert!(!Transaction::is_escrow_like_kind("transfer"));
+    }
 }
-// temp - will remove

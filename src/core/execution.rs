@@ -225,14 +225,27 @@ impl ExecutionLogic {
                 })?;
                 state.escrow_cancel(&tx.from, rid, tx.fee_uplp, Some(tx.nonce))
             }
-            _ => state.apply_transfer(
-                &tx.from,
-                &tx.to,
-                &tx.asset,
-                tx.amount,
-                tx.fee_uplp,
-                Some(tx.nonce),
-            ),
+            other => {
+                // R2-C2: never fall through to transfer for escrow-like kinds.
+                let kind = other.unwrap_or("");
+                let raw = tx.tx_kind.as_deref().unwrap_or("");
+                if Transaction::is_escrow_like_kind(kind)
+                    || Transaction::is_escrow_like_kind(raw)
+                {
+                    return Err(PlatariumError::State(format!(
+                        "unsupported escrow tx_kind '{}' (refusing transfer fallthrough)",
+                        if kind.is_empty() { raw } else { kind }
+                    )));
+                }
+                state.apply_transfer(
+                    &tx.from,
+                    &tx.to,
+                    &tx.asset,
+                    tx.amount,
+                    tx.fee_uplp,
+                    Some(tx.nonce),
+                )
+            }
         }
     }
     

@@ -242,6 +242,104 @@ fn r2_c1_kernel_apply_batch_persists_contact_escrow() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// R2-C2: legacy contact_escrow_* must map to escrow handlers — never transfer to `to`.
+#[test]
+fn r2_c2_legacy_contact_escrow_lock_does_not_transfer() {
+    let _g = ENV_LOCK.lock().unwrap();
+    enable_testnet();
+    std::env::set_var("PLATARIUM_CORE_RPC_INSECURE", "1");
+    let path = temp_state("r2c2legacy");
+    let _ = std::fs::remove_file(&path);
+    init_state_file(&path).unwrap();
+
+    let (mnemonic, alpha) = generate_mnemonic().unwrap();
+    let keys_out = dispatch_rpc(
+        "generate_keys",
+        &json!({
+            "mnemonic": mnemonic,
+            "alphanumeric": alpha,
+            "seed_index": 0
+        }),
+    )
+    .unwrap();
+    let keys: serde_json::Value = serde_json::from_str(&keys_out).unwrap();
+    let from = keys["publicKey"].as_str().unwrap().to_string();
+    let payee = "PxBobLegacyEscrow000000000000000000000000000000000000000000001".to_string();
+    let eid = "eid-r2-c2-legacy-lock";
+    state_credit_json(&path, &from, 20_000, 100, true).unwrap();
+
+    let signed = dispatch_rpc(
+        "sign_transaction",
+        &json!({
+            "from": from,
+            "to": payee,
+            "asset": "PLP",
+            "amount": 1500u64,
+            "fee_uplp": 1u64,
+            "nonce": 0u64,
+            "reads": "[]",
+            "writes": format!("[\"{}\",\"{}\"]", from, payee),
+            "mnemonic": mnemonic,
+            "alphanumeric": alpha,
+            "tx_kind": "contact_escrow_lock",
+            "escrow_id": eid,
+            "purpose": "contact",
+            "expires_at": 1893456000u64,
+            "settle_payee": payee,
+        }),
+    )
+    .unwrap();
+    let apply = state_apply_tx_json(&path, &signed).expect("apply contact_escrow_lock");
+    assert!(
+        apply.contains("true") || apply.contains("ok") || !apply.contains("error"),
+        "{apply}"
+    );
+
+    let state = load_state_file(&path).expect("reload");
+    let esc = state
+        .get_escrow(eid)
+        .expect("legacy contact_escrow_lock must create escrow, not transfer");
+    assert_eq!(esc.amount, 1500);
+    assert_eq!(esc.creator, from);
+    assert_eq!(
+        state.get_balance(&payee),
+        0,
+        "payee must not receive a plain transfer on lock"
+    );
+    assert_eq!(state.get_balance(&from), 18_500);
+
+    // Unknown escrow-like kind must be rejected (no transfer fallthrough).
+    let signed_bad = dispatch_rpc(
+        "sign_transaction",
+        &json!({
+            "from": from,
+            "to": payee,
+            "asset": "PLP",
+            "amount": 100u64,
+            "fee_uplp": 1u64,
+            "nonce": 1u64,
+            "reads": "[]",
+            "writes": format!("[\"{}\",\"{}\"]", from, payee),
+            "mnemonic": mnemonic,
+            "alphanumeric": alpha,
+            "tx_kind": "contact_escrow_unknown",
+            "escrow_id": "eid-bad",
+        }),
+    )
+    .unwrap();
+    let bal_payee_before = load_state_file(&path).unwrap().get_balance(&payee);
+    let bal_from_before = load_state_file(&path).unwrap().get_balance(&from);
+    let bad = state_apply_tx_json(&path, &signed_bad);
+    assert!(bad.is_err(), "unknown escrow-like kind must not apply: {bad:?}");
+    let state2 = load_state_file(&path).unwrap();
+    assert_eq!(state2.get_balance(&payee), bal_payee_before);
+    assert_eq!(state2.get_balance(&from), bal_from_before);
+
+    disable_testnet();
+    std::env::remove_var("PLATARIUM_CORE_RPC_INSECURE");
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn c1_signed_tx_with_stolen_from_rejected_on_apply() {
     let _g = ENV_LOCK.lock().unwrap();

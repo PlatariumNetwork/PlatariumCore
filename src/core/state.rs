@@ -1134,14 +1134,27 @@ impl State {
                     .ok_or_else(|| StateError::Escrow("missing escrow_id".into()))?;
                 self.escrow_cancel(&tx.from, rid, tx.fee_uplp, Some(tx.nonce))
             }
-            _ => self.apply_transfer(
-                &tx.from,
-                &tx.to,
-                &tx.asset,
-                tx.amount,
-                tx.fee_uplp,
-                Some(tx.nonce),
-            ),
+            other => {
+                // R2-C2: never fall through to transfer for escrow-like kinds.
+                let raw = tx.tx_kind.as_deref().unwrap_or("");
+                if Transaction::is_escrow_like_kind(other)
+                    || Transaction::is_escrow_like_kind(raw)
+                {
+                    return Err(StateError::Escrow(format!(
+                        "unsupported escrow tx_kind '{}' (refusing transfer fallthrough)",
+                        if other.is_empty() { raw } else { other }
+                    ))
+                    .into());
+                }
+                self.apply_transfer(
+                    &tx.from,
+                    &tx.to,
+                    &tx.asset,
+                    tx.amount,
+                    tx.fee_uplp,
+                    Some(tx.nonce),
+                )
+            }
         }
     }
 }
