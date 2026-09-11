@@ -10,7 +10,7 @@ use crate::error::{PlatariumError, Result};
 use crate::storage::cache::open_cached;
 use crate::storage::commit::AccountRecord;
 use crate::storage::query::get_account;
-use crate::storage::schema::key_account;
+use crate::storage::schema::{key_account, key_escrow, KEY_META_ESCROWS, PREFIX_ESCROW};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -29,7 +29,9 @@ pub trait StorageEngine {
 #[derive(Debug, Default)]
 pub struct InMemoryStorageEngine {
     committed: HashMap<String, AccountPostImage>,
+    committed_escrows: Vec<String>,
     staging: Option<HashMap<String, AccountPostImage>>,
+    staging_escrows: Option<Vec<String>>,
 }
 
 impl InMemoryStorageEngine {
@@ -49,16 +51,32 @@ impl InMemoryStorageEngine {
         for addr in addrs {
             committed.insert(addr.clone(), account_from_state(state, &addr));
         }
+        let mut escrows: Vec<_> = snap.contact_escrows_arc().values().cloned().collect();
+        escrows.sort_by(|a, b| a.escrow_id.cmp(&b.escrow_id));
+        let committed_escrows: Vec<String> = escrows
+            .iter()
+            .map(|e| {
+                serde_json::to_string(e).expect("Escrow must serialize for InMemoryStorageEngine")
+            })
+            .collect();
         Self {
             committed,
+            committed_escrows,
             staging: None,
+            staging_escrows: None,
         }
+    }
+
+    /// Escrow JSON post-images last committed (sorted by escrow_id at write time).
+    pub fn escrows_json(&self) -> &[String] {
+        &self.committed_escrows
     }
 }
 
 impl StorageEngine for InMemoryStorageEngine {
     fn begin(&mut self) -> Result<()> {
         self.staging = Some(self.committed.clone());
+        self.staging_escrows = Some(self.committed_escrows.clone());
         Ok(())
     }
 
@@ -73,7 +91,18 @@ impl StorageEngine for InMemoryStorageEngine {
         Ok(())
     }
 
-    fn apply_escrows(&mut self, _escrows_json: &[String]) -> Result<()> {
+    fn apply_escrows(&mut self, escrows_json: &[String]) -> Result<()> {
+        let staging = self
+            .staging_escrows
+            .as_mut()
+            .ok_or_else(|| PlatariumError::State("StorageEngine.begin not called".into()))?;
+        // Validate JSON before replacing (same contract as StateFile / Rocks).
+        for js in escrows_json {
+            let _: crate::modules::escrow::Escrow = serde_json::from_str(js).map_err(|e| {
+                PlatariumError::State(format!("invalid escrow json in StateDiff: {}", e))
+            })?;
+        }
+        *staging = escrows_json.to_vec();
         Ok(())
     }
 
@@ -82,12 +111,18 @@ impl StorageEngine for InMemoryStorageEngine {
             .staging
             .take()
             .ok_or_else(|| PlatariumError::State("StorageEngine.begin not called".into()))?;
+        let staging_escrows = self
+            .staging_escrows
+            .take()
+            .ok_or_else(|| PlatariumError::State("StorageEngine.begin not called".into()))?;
         self.committed = staging;
+        self.committed_escrows = staging_escrows;
         Ok(())
     }
 
     fn rollback(&mut self) -> Result<()> {
         self.staging = None;
+        self.staging_escrows = None;
         Ok(())
     }
 
@@ -176,6 +211,8 @@ impl StorageEngine for StateFileStorageEngine {
 pub struct RocksAccountStorageEngine {
     db_path: PathBuf,
     staging: Vec<AccountPostImage>,
+    /// When set, replace-all escrow keys on commit (StateDiff `escrows_json`).
+    staging_escrows: Option<Vec<String>>,
     begun: bool,
 }
 
@@ -184,14 +221,27 @@ impl RocksAccountStorageEngine {
         Ok(Self {
             db_path: db_path.as_ref().to_path_buf(),
             staging: Vec::new(),
+            staging_escrows: None,
             begun: false,
         })
+    }
+
+    /// Load escrow JSON post-images last written by `apply_escrows` / commit.
+    pub fn load_escrows_json(&self) -> Result<Vec<String>> {
+        let store = open_cached(&self.db_path)?;
+        match store.get(KEY_META_ESCROWS)? {
+            Some(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
+                PlatariumError::State(format!("decode meta/escrows: {}", e))
+            }),
+            None => Ok(Vec::new()),
+        }
     }
 }
 
 impl StorageEngine for RocksAccountStorageEngine {
     fn begin(&mut self) -> Result<()> {
         self.staging.clear();
+        self.staging_escrows = None;
         self.begun = true;
         Ok(())
     }
@@ -204,7 +254,16 @@ impl StorageEngine for RocksAccountStorageEngine {
         Ok(())
     }
 
-    fn apply_escrows(&mut self, _escrows_json: &[String]) -> Result<()> {
+    fn apply_escrows(&mut self, escrows_json: &[String]) -> Result<()> {
+        if !self.begun {
+            return Err(PlatariumError::State("StorageEngine.begin not called".into()));
+        }
+        for js in escrows_json {
+            let _: crate::modules::escrow::Escrow = serde_json::from_str(js).map_err(|e| {
+                PlatariumError::State(format!("invalid escrow json in StateDiff: {}", e))
+            })?;
+        }
+        self.staging_escrows = Some(escrows_json.to_vec());
         Ok(())
     }
 
@@ -225,14 +284,38 @@ impl StorageEngine for RocksAccountStorageEngine {
                 .map_err(|e| PlatariumError::State(format!("encode account: {}", e)))?;
             batch.put(key_account(&a.address), bytes);
         }
+        if let Some(ref escrows) = self.staging_escrows {
+            // Replace-all: drop previous per-id keys, then write post-images + meta index.
+            let iter = store.db().prefix_iterator(PREFIX_ESCROW);
+            for item in iter {
+                let (key, _) = item.map_err(|e| {
+                    PlatariumError::State(format!("rocksdb escrow prefix iter: {}", e))
+                })?;
+                if !key.starts_with(PREFIX_ESCROW) {
+                    break;
+                }
+                batch.delete(key);
+            }
+            for js in escrows {
+                let e: crate::modules::escrow::Escrow = serde_json::from_str(js).map_err(|err| {
+                    PlatariumError::State(format!("invalid escrow json in StateDiff: {}", err))
+                })?;
+                batch.put(key_escrow(&e.escrow_id), js.as_bytes());
+            }
+            let meta = serde_json::to_vec(escrows)
+                .map_err(|e| PlatariumError::State(format!("encode meta/escrows: {}", e)))?;
+            batch.put(KEY_META_ESCROWS, meta);
+        }
         store.write_batch(batch)?;
         self.staging.clear();
+        self.staging_escrows = None;
         self.begun = false;
         Ok(())
     }
 
     fn rollback(&mut self) -> Result<()> {
         self.staging.clear();
+        self.staging_escrows = None;
         self.begun = false;
         Ok(())
     }

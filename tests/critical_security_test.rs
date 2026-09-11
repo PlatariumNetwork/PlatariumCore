@@ -165,6 +165,83 @@ fn c3_kernel_apply_batch_executes_and_commits() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// R2-C1: escrow_lock via kernel_apply_batch must persist escrow (not only debit balances).
+#[test]
+fn r2_c1_kernel_apply_batch_persists_contact_escrow() {
+    let _g = ENV_LOCK.lock().unwrap();
+    enable_testnet();
+    std::env::set_var("PLATARIUM_CORE_RPC_INSECURE", "1");
+    let path = temp_state("r2c1escrow");
+    let _ = std::fs::remove_file(&path);
+    init_state_file(&path).unwrap();
+
+    let (mnemonic, alpha) = generate_mnemonic().unwrap();
+    let keys_out = dispatch_rpc(
+        "generate_keys",
+        &json!({
+            "mnemonic": mnemonic,
+            "alphanumeric": alpha,
+            "seed_index": 0
+        }),
+    )
+    .unwrap();
+    let keys: serde_json::Value = serde_json::from_str(&keys_out).unwrap();
+    let from = keys["publicKey"].as_str().unwrap().to_string();
+    let payee = "PxBobEscrowCrit0000000000000000000000000000000000000000000001";
+    let eid = "eid-r2-c1-kernel-apply";
+    state_credit_json(&path, &from, 20_000, 100, true).unwrap();
+
+    let signed = dispatch_rpc(
+        "sign_transaction",
+        &json!({
+            "from": from,
+            "to": payee,
+            "asset": "PLP",
+            "amount": 1500u64,
+            "fee_uplp": 1u64,
+            "nonce": 0u64,
+            "reads": "[]",
+            "writes": format!("[\"{}\",\"{}\"]", from, payee),
+            "mnemonic": mnemonic,
+            "alphanumeric": alpha,
+            "tx_kind": "escrow_lock",
+            "escrow_id": eid,
+            "purpose": "contact",
+            "expires_at": 1893456000u64,
+            "settle_payee": payee,
+        }),
+    )
+    .unwrap();
+    let tx_val: serde_json::Value = serde_json::from_str(&signed).unwrap();
+
+    let out = dispatch_rpc(
+        "kernel_apply_batch",
+        &json!({
+            "state_file": path.to_string_lossy(),
+            "parallel": false,
+            "batch": {
+                "batch_id": "r2c1",
+                "height": 1,
+                "transactions": [tx_val]
+            }
+        }),
+    )
+    .expect("kernel_apply_batch escrow_lock");
+    assert!(out.contains("\"ok\":true") || out.contains("\"ok\": true"), "{out}");
+
+    let state = load_state_file(&path).expect("reload state");
+    let esc = state
+        .get_escrow(eid)
+        .expect("escrow record must be persisted by StateDiff commit");
+    assert_eq!(esc.amount, 1500);
+    assert_eq!(esc.creator, from);
+    assert_eq!(state.get_balance(&from), 18_500);
+
+    disable_testnet();
+    std::env::remove_var("PLATARIUM_CORE_RPC_INSECURE");
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn c1_signed_tx_with_stolen_from_rejected_on_apply() {
     let _g = ENV_LOCK.lock().unwrap();

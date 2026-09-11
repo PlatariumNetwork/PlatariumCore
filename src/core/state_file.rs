@@ -69,7 +69,9 @@ impl StateFileData {
         escrows.sort_by(|a, b| a.escrow_id.cmp(&b.escrow_id));
         let escrows_json: Vec<String> = escrows
             .iter()
-            .filter_map(|e| serde_json::to_string(e).ok())
+            .map(|e| {
+                serde_json::to_string(e).expect("Escrow must serialize for state file")
+            })
             .collect();
         let contact_escrows: Vec<(String, String, String, u8)> = escrows
             .iter()

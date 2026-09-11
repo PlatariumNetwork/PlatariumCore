@@ -186,4 +186,135 @@ mod tests {
         // commit empty still ok
         assert!(commit_state_diff(&mut mem, &diff).unwrap().ok);
     }
+
+    fn signed_escrow_lock(
+        mnemonic: &str,
+        alpha: &str,
+        from: &str,
+        payee: &str,
+        amount: u128,
+        fee: u128,
+        nonce: u64,
+        escrow_id: &str,
+    ) -> Transaction {
+        use crate::core::core_rpc::dispatch_rpc;
+        use serde_json::json;
+        let signed = dispatch_rpc(
+            "sign_transaction",
+            &json!({
+                "from": from,
+                "to": payee,
+                "asset": "PLP",
+                "amount": amount,
+                "fee_uplp": fee,
+                "nonce": nonce,
+                "reads": "[]",
+                "writes": format!("[\"{}\",\"{}\"]", from, payee),
+                "mnemonic": mnemonic,
+                "alphanumeric": alpha,
+                "tx_kind": "escrow_lock",
+                "escrow_id": escrow_id,
+                "purpose": "contact",
+                "expires_at": 1893456000u64,
+                "settle_payee": payee,
+            }),
+        )
+        .unwrap();
+        Transaction::from_gateway_json(&signed).unwrap()
+    }
+
+    /// R2-C1: escrow_lock via StateDiff must persist the escrow record (not only debit balances).
+    #[test]
+    fn escrow_lock_persists_via_state_diff_state_file_and_inmemory() {
+        use crate::core::state_file::{load_state_file, save_state_file};
+        use crate::storage::engine::StateFileStorageEngine;
+        use tempfile::TempDir;
+
+        let (mn, alpha, alice) = wallet();
+        let bob = "PxBobEscrowDiff00000000000000000000000000000000000000000000001";
+        let eid = "eid-r2-c1-persist";
+        let state = State::new();
+        state.set_balance(&alice, 10_000);
+        state.set_uplp_balance(&alice, 50);
+        state.set_nonce(&alice, 0);
+        let root_before = state.snapshot().compute_state_root();
+
+        let tx = signed_escrow_lock(&mn, &alpha, &alice, bob, 1_000, 1, 0, eid);
+        let batch = OrderedBatch::new("escrow-c1".into(), 1, vec![tx]).unwrap();
+        let out = execute_ordered_batch(&state, &batch, ExecuteOptions::default()).unwrap();
+        assert_eq!(out.diff.receipts[0].status, "ok", "{:?}", out.diff.receipts[0]);
+        let escrows = out
+            .diff
+            .escrows_json
+            .as_ref()
+            .expect("StateDiff must include escrows_json");
+        assert!(
+            escrows.iter().any(|j| j.contains(eid)),
+            "escrow post-image missing: {escrows:?}"
+        );
+        assert_ne!(
+            out.diff.post_state_root, root_before,
+            "post_state_root must cover escrow mutation"
+        );
+
+        // InMemory must not silently drop escrows while applying balance post-images.
+        let mut mem = InMemoryStorageEngine::from_state(&state);
+        let res = commit_state_diff(&mut mem, &out.diff).unwrap();
+        assert!(res.ok, "{:?}", res.error);
+        assert!(
+            mem.escrows_json().iter().any(|j| j.contains(eid)),
+            "InMemory lost escrow: {:?}",
+            mem.escrows_json()
+        );
+        let alice_img = mem.get_account(&alice).unwrap();
+        assert_eq!(alice_img.plp_balance, "9000");
+        assert_eq!(alice_img.nonce, 1);
+
+        // StateFile / kernel_apply_batch path: reload must still have the escrow.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("state.json");
+        save_state_file(&path, &state).unwrap();
+        let mut eng = StateFileStorageEngine::open(&path).unwrap();
+        let res = commit_state_diff(&mut eng, &out.diff).unwrap();
+        assert!(res.ok, "{:?}", res.error);
+        let reloaded = load_state_file(&path).unwrap();
+        let esc = reloaded
+            .get_escrow(eid)
+            .expect("contact escrow must survive StateDiff commit");
+        assert_eq!(esc.amount, 1_000);
+        assert_eq!(esc.creator, alice);
+        assert_eq!(reloaded.get_balance(&alice), 9_000);
+    }
+
+    #[test]
+    fn escrow_lock_persists_via_state_diff_rocks() {
+        use crate::storage::cache::evict_cached;
+        use crate::storage::engine::RocksAccountStorageEngine;
+        use tempfile::TempDir;
+
+        let (mn, alpha, alice) = wallet();
+        let bob = "PxBobEscrowRocks0000000000000000000000000000000000000000000001";
+        let eid = "eid-r2-c1-rocks";
+        let state = State::new();
+        state.set_balance(&alice, 10_000);
+        state.set_uplp_balance(&alice, 50);
+        state.set_nonce(&alice, 0);
+
+        let tx = signed_escrow_lock(&mn, &alpha, &alice, bob, 500, 1, 0, eid);
+        let batch = OrderedBatch::new("escrow-rocks".into(), 1, vec![tx]).unwrap();
+        let out = execute_ordered_batch(&state, &batch, ExecuteOptions::default()).unwrap();
+        assert_eq!(out.diff.receipts[0].status, "ok");
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("rocks");
+        let mut eng = RocksAccountStorageEngine::open(&db_path).unwrap();
+        let res = commit_state_diff(&mut eng, &out.diff).unwrap();
+        assert!(res.ok, "{:?}", res.error);
+        let loaded = eng.load_escrows_json().unwrap();
+        assert!(
+            loaded.iter().any(|j| j.contains(eid)),
+            "Rocks lost escrow: {loaded:?}"
+        );
+        evict_cached(&db_path);
+    }
 }

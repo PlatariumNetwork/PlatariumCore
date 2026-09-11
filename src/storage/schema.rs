@@ -12,6 +12,15 @@ pub const PREFIX_IDX_BLOCK: &[u8] = b"i/b/";
 pub const PREFIX_SNAPSHOT: &[u8] = b"snap/";
 pub const KEY_META_HEAD: &[u8] = b"meta/head";
 pub const KEY_META_SCHEMA: &[u8] = b"meta/schema";
+/// Full escrow post-image set from StateDiff (`escrows_json`), replace-all semantics.
+pub const KEY_META_ESCROWS: &[u8] = b"meta/escrows";
+pub const PREFIX_ESCROW: &[u8] = b"e/";
+
+pub fn key_escrow(escrow_id: &str) -> Vec<u8> {
+    let mut k = PREFIX_ESCROW.to_vec();
+    k.extend_from_slice(escrow_id.as_bytes());
+    k
+}
 
 pub fn key_account(address: &str) -> Vec<u8> {
     let mut k = PREFIX_ACCOUNT.to_vec();

@@ -82,7 +82,7 @@ pub fn execute_ordered_batch(
     }
 
     let accounts = collect_account_images(&working, &touched);
-    let escrows_json = collect_escrow_images(&working);
+    let escrows_json = collect_escrow_images(&working)?;
     let post_root = working.snapshot().compute_state_root();
     let mut diff = StateDiff {
         schema_version: STATE_DIFF_SCHEMA_VERSION,
@@ -196,14 +196,17 @@ fn collect_account_images(state: &State, touched: &BTreeSet<String>) -> Vec<Acco
     out
 }
 
-fn collect_escrow_images(state: &State) -> Vec<String> {
+fn collect_escrow_images(state: &State) -> Result<Vec<String>> {
     let snap = state.snapshot();
     let mut escrows: Vec<_> = snap.contact_escrows_arc().values().cloned().collect();
     escrows.sort_by(|a, b| a.escrow_id.cmp(&b.escrow_id));
-    escrows
-        .iter()
-        .filter_map(|e| serde_json::to_string(e).ok())
-        .collect()
+    let mut out = Vec::with_capacity(escrows.len());
+    for e in &escrows {
+        out.push(serde_json::to_string(e).map_err(|err| {
+            PlatariumError::State(format!("encode escrow post-image {}: {}", e.escrow_id, err))
+        })?);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
