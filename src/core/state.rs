@@ -582,30 +582,20 @@ impl State {
         abm.insert(k, bal + amount);
     }
 
-    /// Debit principal + fee for escrow lock (payment module).
-    pub fn debit_for_escrow_lock(
-        &self,
+    /// Debit principal + fee against already-held balance maps (C6 atomic paths).
+    /// Lock order for callers: asset_balances → uplp_balances → nonces → contact_escrows.
+    fn debit_for_escrow_lock_in_maps(
+        ab: &mut HashMap<(Address, String), u128>,
+        ub: &mut HashMap<Address, u128>,
+        nonces: &mut HashMap<Address, u64>,
         from: &Address,
         asset: &Asset,
         amount: u128,
         fee_uplp: u128,
         expected_nonce: Option<u64>,
     ) -> Result<()> {
-        if asset.is_non_transferable() {
-            return Err(StateError::Other(format!(
-                "{} is accumulate-only and cannot be locked in escrow",
-                asset.as_canonical()
-            ))
-            .into());
-        }
         let treasury = TREASURY_ADDRESS.to_string();
         let k = Self::asset_key(from, asset);
-        let mut ab_arc = self.asset_balances.write().unwrap();
-        let mut ub_arc = self.uplp_balances.write().unwrap();
-        let mut nonces_arc = self.nonces.write().unwrap();
-        let ab = Arc::make_mut(&mut ab_arc);
-        let ub = Arc::make_mut(&mut ub_arc);
-        let nonces = Arc::make_mut(&mut nonces_arc);
 
         if let Some(expected) = expected_nonce {
             let cur = nonces.get(from).copied().unwrap_or(0);
@@ -616,11 +606,7 @@ impl State {
 
         let asset_bal = ab.get(&k).copied().unwrap_or(0);
         let uplp_bal = ub.get(from).copied().unwrap_or(0);
-        let fee_from_plp = if *asset == Asset::PLP {
-            fee_uplp.saturating_sub(uplp_bal)
-        } else {
-            fee_uplp.saturating_sub(uplp_bal)
-        };
+        let fee_from_plp = fee_uplp.saturating_sub(uplp_bal);
         let required = if *asset == Asset::PLP {
             amount.saturating_add(fee_from_plp)
         } else {
@@ -672,8 +658,34 @@ impl State {
         Ok(())
     }
 
+    /// Debit principal + fee for escrow lock (payment module).
+    pub fn debit_for_escrow_lock(
+        &self,
+        from: &Address,
+        asset: &Asset,
+        amount: u128,
+        fee_uplp: u128,
+        expected_nonce: Option<u64>,
+    ) -> Result<()> {
+        if asset.is_non_transferable() {
+            return Err(StateError::Other(format!(
+                "{} is accumulate-only and cannot be locked in escrow",
+                asset.as_canonical()
+            ))
+            .into());
+        }
+        let mut ab_arc = self.asset_balances.write().unwrap();
+        let mut ub_arc = self.uplp_balances.write().unwrap();
+        let mut nonces_arc = self.nonces.write().unwrap();
+        let ab = Arc::make_mut(&mut ab_arc);
+        let ub = Arc::make_mut(&mut ub_arc);
+        let nonces = Arc::make_mut(&mut nonces_arc);
+        Self::debit_for_escrow_lock_in_maps(ab, ub, nonces, from, asset, amount, fee_uplp, expected_nonce)
+    }
+
     /// Generic escrow_lock.
-    /// Validates escrow id uniqueness before debiting so a failed lock cannot burn fees (C6).
+    /// Validates escrow id uniqueness and balances under one lock set, then atomically
+    /// debits and inserts so a failed lock cannot burn fees (C6).
     pub fn escrow_lock(
         &self,
         creator: &Address,
@@ -708,23 +720,30 @@ impl State {
             .map_err(|e| StateError::Escrow(e.to_string()))?;
         let rules_hash = rules.hash_hex();
 
-        // Pre-check under write lock before any balance movement.
-        {
-            let ce = self.contact_escrows.write().unwrap();
-            if ce.contains_key(escrow_id) {
-                return Err(StateError::Escrow(EscrowError::AlreadyExists.to_string()).into());
-            }
-        }
+        // Atomic: uniqueness + balances + debit + insert under one lock set (C6).
+        let mut ab_arc = self.asset_balances.write().unwrap();
+        let mut ub_arc = self.uplp_balances.write().unwrap();
+        let mut nonces_arc = self.nonces.write().unwrap();
+        let mut ce_arc = self.contact_escrows.write().unwrap();
+        let ab = Arc::make_mut(&mut ab_arc);
+        let ub = Arc::make_mut(&mut ub_arc);
+        let nonces = Arc::make_mut(&mut nonces_arc);
+        let ce = Arc::make_mut(&mut ce_arc);
 
-        self.debit_for_escrow_lock(creator, asset, amount, fee_uplp, expected_nonce)?;
-
-        let mut ce = self.contact_escrows.write().unwrap();
-        let map = Arc::make_mut(&mut ce);
-        if map.contains_key(escrow_id) {
-            // Concurrent lock won the race — do not overwrite; fee already taken (rare).
+        if ce.contains_key(escrow_id) {
             return Err(StateError::Escrow(EscrowError::AlreadyExists.to_string()).into());
         }
-        map.insert(
+        Self::debit_for_escrow_lock_in_maps(
+            ab,
+            ub,
+            nonces,
+            creator,
+            asset,
+            amount,
+            fee_uplp,
+            expected_nonce,
+        )?;
+        ce.insert(
             escrow_id.to_string(),
             Escrow {
                 escrow_id: escrow_id.to_string(),
@@ -811,7 +830,7 @@ impl State {
     }
 
     /// Generic escrow_settle using rules engine.
-    /// Validates escrow + settler auth before debiting fee (C5, C6).
+    /// Validates escrow + settler auth, then atomically debits fee and commits (C5, C6).
     pub fn escrow_settle(
         &self,
         settler: &Address,
@@ -823,62 +842,27 @@ impl State {
         settle_tx_hash: &str,
         expected_nonce: Option<u64>,
     ) -> Result<()> {
-        // Phase 1: validate without moving balances.
-        let bind = {
-            let ce = self.contact_escrows.read().unwrap();
-            let entry = ce
-                .get(escrow_id)
-                .ok_or_else(|| StateError::Escrow(EscrowError::NotFound.to_string()))?;
-            Self::assert_settler_authorized(settler, entry, outcome_key)?;
-            if entry.status != EscrowStatus::Locked {
-                return Err(StateError::Escrow(
-                    EscrowError::InvalidStatus(entry.status).to_string(),
-                )
-                .into());
-            }
-            if !entry.settle_tx_hash.is_empty() {
-                return Err(StateError::Escrow(EscrowError::Replay.to_string()).into());
-            }
-            if entry.amount != amount {
-                return Err(StateError::Escrow(
-                    EscrowError::AmountMismatch {
-                        locked: entry.amount,
-                        got: amount,
-                    }
-                    .to_string(),
-                )
-                .into());
-            }
-
-            let mut bind = bindings;
-            if bind.sender.is_empty() {
-                bind.sender = entry.creator.clone();
-            }
-            if bind.receiver.is_empty() {
-                bind.receiver = entry.beneficiary.clone();
-            }
-            if bind.treasury.is_empty() {
-                bind.treasury = TREASURY_ADDRESS.to_string();
-            }
-            if bind.burn.is_empty() {
-                bind.burn = "burn".to_string();
-            }
-            // Ensure rules accept this outcome before debiting.
-            apply_rules(&entry.rules, outcome_key, amount, &bind)
-                .map_err(|e| StateError::Escrow(e.to_string()))?;
-            bind
-        };
-
-        // Phase 2: debit settler fee only after validation succeeded.
-        self.debit_for_escrow_lock(settler, &Asset::PLP, 0, fee_uplp, expected_nonce)?;
-
-        // Phase 3: commit escrow mutation with re-check.
+        // Atomic: validate + debit fee + commit under one lock set (C6).
+        let mut ab_arc = self.asset_balances.write().unwrap();
+        let mut ub_arc = self.uplp_balances.write().unwrap();
+        let mut nonces_arc = self.nonces.write().unwrap();
         let mut ce_arc = self.contact_escrows.write().unwrap();
+        let ab = Arc::make_mut(&mut ab_arc);
+        let ub = Arc::make_mut(&mut ub_arc);
+        let nonces = Arc::make_mut(&mut nonces_arc);
         let ce = Arc::make_mut(&mut ce_arc);
+
         let entry = ce
-            .get_mut(escrow_id)
+            .get(escrow_id)
             .ok_or_else(|| StateError::Escrow(EscrowError::NotFound.to_string()))?;
-        if entry.status != EscrowStatus::Locked || !entry.settle_tx_hash.is_empty() {
+        Self::assert_settler_authorized(settler, entry, outcome_key)?;
+        if entry.status != EscrowStatus::Locked {
+            return Err(StateError::Escrow(
+                EscrowError::InvalidStatus(entry.status).to_string(),
+            )
+            .into());
+        }
+        if !entry.settle_tx_hash.is_empty() {
             return Err(StateError::Escrow(EscrowError::Replay.to_string()).into());
         }
         if entry.amount != amount {
@@ -891,20 +875,53 @@ impl State {
             )
             .into());
         }
+
+        let mut bind = bindings;
+        if bind.sender.is_empty() {
+            bind.sender = entry.creator.clone();
+        }
+        if bind.receiver.is_empty() {
+            bind.receiver = entry.beneficiary.clone();
+        }
+        if bind.treasury.is_empty() {
+            bind.treasury = TREASURY_ADDRESS.to_string();
+        }
+        if bind.burn.is_empty() {
+            bind.burn = "burn".to_string();
+        }
         let credits = apply_rules(&entry.rules, outcome_key, amount, &bind)
             .map_err(|e| StateError::Escrow(e.to_string()))?;
+
+        Self::debit_for_escrow_lock_in_maps(
+            ab,
+            ub,
+            nonces,
+            settler,
+            &Asset::PLP,
+            0,
+            fee_uplp,
+            expected_nonce,
+        )?;
+
         let new_status = match outcome_key {
             "cancel" => EscrowStatus::Cancelled,
             "timeout" => EscrowStatus::Expired,
             "reject" => EscrowStatus::Refunded,
             _ => EscrowStatus::Released,
         };
+        let entry = ce
+            .get_mut(escrow_id)
+            .ok_or_else(|| StateError::Escrow(EscrowError::NotFound.to_string()))?;
         entry.settle_tx_hash = settle_tx_hash.to_string();
         entry.status = new_status;
-        drop(ce_arc);
 
         for (addr, amt) in credits {
-            self.credit_asset(&addr, &Asset::PLP, amt);
+            if amt == 0 {
+                continue;
+            }
+            let k = Self::asset_key(&addr, &Asset::PLP);
+            let bal = ab.get(&k).copied().unwrap_or(0);
+            ab.insert(k, bal + amt);
         }
         Ok(())
     }
@@ -974,20 +991,43 @@ impl State {
                 expected_nonce,
             )
         } else {
-            // Validate before debit
-            if entry.status != EscrowStatus::Locked {
+            // Atomic: validate + debit fee + refund principal + mark Refunded (C6).
+            let mut ab_arc = self.asset_balances.write().unwrap();
+            let mut ub_arc = self.uplp_balances.write().unwrap();
+            let mut nonces_arc = self.nonces.write().unwrap();
+            let mut ce_arc = self.contact_escrows.write().unwrap();
+            let ab = Arc::make_mut(&mut ab_arc);
+            let ub = Arc::make_mut(&mut ub_arc);
+            let nonces = Arc::make_mut(&mut nonces_arc);
+            let ce = Arc::make_mut(&mut ce_arc);
+
+            let e = ce
+                .get(escrow_id)
+                .ok_or_else(|| StateError::Escrow(EscrowError::NotFound.to_string()))?;
+            if e.status != EscrowStatus::Locked {
                 return Err(StateError::Escrow(
-                    EscrowError::InvalidStatus(entry.status).to_string(),
+                    EscrowError::InvalidStatus(e.status).to_string(),
                 )
                 .into());
             }
-            self.debit_for_escrow_lock(settler, &Asset::PLP, 0, fee_uplp, expected_nonce)?;
-            self.credit_asset(&entry.creator, &Asset::PLP, amount);
-            let mut ce = self.contact_escrows.write().unwrap();
-            if let Some(e) = Arc::make_mut(&mut ce).get_mut(escrow_id) {
-                if e.status != EscrowStatus::Locked {
-                    return Err(StateError::Escrow(EscrowError::Replay.to_string()).into());
-                }
+            let creator = e.creator.clone();
+            let refund_amount = e.amount;
+            Self::debit_for_escrow_lock_in_maps(
+                ab,
+                ub,
+                nonces,
+                settler,
+                &Asset::PLP,
+                0,
+                fee_uplp,
+                expected_nonce,
+            )?;
+            if refund_amount > 0 {
+                let k = Self::asset_key(&creator, &Asset::PLP);
+                let bal = ab.get(&k).copied().unwrap_or(0);
+                ab.insert(k, bal + refund_amount);
+            }
+            if let Some(e) = ce.get_mut(escrow_id) {
                 e.status = EscrowStatus::Refunded;
             }
             Ok(())
