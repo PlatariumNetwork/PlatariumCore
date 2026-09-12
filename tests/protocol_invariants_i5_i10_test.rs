@@ -1,13 +1,17 @@
 //! Executable coverage for protocol invariants I5–I10 (issues #83–#88).
 //!
-//! | Id | Statement |
-//! |----|-----------|
-//! | I5 | Tokens/XP cannot disappear on persistence |
-//! | I6 | A finalized block cannot be applied twice |
-//! | I7 | A conflicting block cannot overwrite the canonical tip |
-//! | I8 | A failed commit cannot expose partial state |
-//! | I9 | Restart preserves canonical state |
-//! | I10 | A Core error cannot imply consensus acceptance |
+//! Linked from [`platarium_core::PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS`] and
+//! run via [`platarium_core::PROTOCOL_INVARIANT_CARGO_TEST_INVOCATION`] (issue #89):
+//! `cargo test --test protocol_invariants_i5_i10`.
+//!
+//! | Id | Statement | Test |
+//! |----|-----------|------|
+//! | I5 | Tokens/XP cannot disappear on persistence | `i5_tokens_xp_persist` |
+//! | I6 | A finalized block cannot be applied twice | `i6_finalized_block_not_applied_twice` |
+//! | I7 | A conflicting block cannot overwrite the canonical tip | `i7_conflict_cannot_overwrite_canonical` |
+//! | I8 | A failed commit cannot expose partial state | `i8_failed_commit_no_partial_state` |
+//! | I9 | Restart preserves canonical state | `i9_restart_preserves_canonical` |
+//! | I10 | A Core error cannot imply consensus acceptance | `i10_core_error_not_consensus_accept` |
 
 use platarium_core::*;
 use std::collections::{BTreeMap, HashSet};

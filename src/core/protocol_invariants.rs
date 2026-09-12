@@ -1,20 +1,37 @@
-//! Core protocol invariants I1–I10 (issue #78).
+//! Core protocol invariants I1–I10 (issue #78 / #89).
 //!
 //! Short freeze of consensus/execution safety rules. Executable coverage for
 //! I1–I4 lands in this module; I5–I10 integration tests live under `tests/`.
+//! Each `Ii` links to a real test name and path (issue #89).
 //!
-//! | Id | Statement | Test path |
-//! |----|-----------|-----------|
-//! | **I1** | Same block and state yield the same [`StateDiff`](crate::core::kernel::StateDiff). | `src/core/protocol_invariants.rs#i1_same_block_state_diff` |
-//! | **I2** | An invalid signature is never executable. | `src/core/protocol_invariants.rs#i2_invalid_signature_never_executable` |
-//! | **I3** | Nonce cannot decrease. | `src/core/protocol_invariants.rs#i3_nonce_cannot_decrease` |
-//! | **I4** | Balance cannot become negative. | `src/core/protocol_invariants.rs#i4_balance_cannot_become_negative` |
-//! | **I5** | Tokens/XP cannot disappear on persistence. | `tests/protocol_invariants_i5_i10_test.rs#i5_tokens_xp_persist` |
-//! | **I6** | A finalized block cannot be applied twice. | `tests/protocol_invariants_i5_i10_test.rs#i6_finalized_block_not_applied_twice` |
-//! | **I7** | A conflicting block cannot overwrite the canonical tip. | `tests/protocol_invariants_i5_i10_test.rs#i7_conflict_cannot_overwrite_canonical` |
-//! | **I8** | A failed commit cannot expose partial state. | `tests/protocol_invariants_i5_i10_test.rs#i8_failed_commit_no_partial_state` |
-//! | **I9** | Restart preserves canonical state. | `tests/protocol_invariants_i5_i10_test.rs#i9_restart_preserves_canonical` |
-//! | **I10** | A Core error cannot imply consensus acceptance. | `tests/protocol_invariants_i5_i10_test.rs#i10_core_error_not_consensus_accept` |
+//! | Id | Statement | Test module / path |
+//! |----|-----------|--------------------|
+//! | **I1** | Same block and state yield the same [`StateDiff`](crate::core::kernel::StateDiff). | `core::protocol_invariants::tests::i1_same_block_state_diff` → `src/core/protocol_invariants.rs` |
+//! | **I2** | An invalid signature is never executable. | `core::protocol_invariants::tests::i2_invalid_signature_never_executable` → `src/core/protocol_invariants.rs` |
+//! | **I3** | Nonce cannot decrease. | `core::protocol_invariants::tests::i3_nonce_cannot_decrease` → `src/core/protocol_invariants.rs` |
+//! | **I4** | Balance cannot become negative. | `core::protocol_invariants::tests::i4_balance_cannot_become_negative` → `src/core/protocol_invariants.rs` |
+//! | **I5** | Tokens/XP cannot disappear on persistence. | `protocol_invariants_i5_i10::i5_tokens_xp_persist` → `tests/protocol_invariants_i5_i10_test.rs` |
+//! | **I6** | A finalized block cannot be applied twice. | `protocol_invariants_i5_i10::i6_finalized_block_not_applied_twice` → `tests/protocol_invariants_i5_i10_test.rs` |
+//! | **I7** | A conflicting block cannot overwrite the canonical tip. | `protocol_invariants_i5_i10::i7_conflict_cannot_overwrite_canonical` → `tests/protocol_invariants_i5_i10_test.rs` |
+//! | **I8** | A failed commit cannot expose partial state. | `protocol_invariants_i5_i10::i8_failed_commit_no_partial_state` → `tests/protocol_invariants_i5_i10_test.rs` |
+//! | **I9** | Restart preserves canonical state. | `protocol_invariants_i5_i10::i9_restart_preserves_canonical` → `tests/protocol_invariants_i5_i10_test.rs` |
+//! | **I10** | A Core error cannot imply consensus acceptance. | `protocol_invariants_i5_i10::i10_core_error_not_consensus_accept` → `tests/protocol_invariants_i5_i10_test.rs` |
+//!
+//! ## Cargo / CI invocation (issue #89)
+//!
+//! See [`PROTOCOL_INVARIANT_CARGO_TEST_INVOCATION`]. Locally or in CI:
+//!
+//! ```text
+//! cargo test --lib core::protocol_invariants::
+//! cargo test --test protocol_invariants_i5_i10
+//! ```
+//!
+//! Single-invariant filters (examples):
+//!
+//! ```text
+//! cargo test --lib core::protocol_invariants::tests::i1_same_block_state_diff
+//! cargo test --test protocol_invariants_i5_i10 i5_tokens_xp_persist
+//! ```
 //!
 //! See also [`crate::core::protocol_notes`] (clocks) and
 //! [`crate::core::determinism`] (determinism audit).
@@ -49,19 +66,27 @@ pub const GATEWAY_CORE_ERROR_NOT_ACCEPT_DOC: &str = concat!(
     "must not be mapped to consensus accept or block finalized"
 );
 
-/// Test-path anchors for I1–I10 (all linked to executable tests).
+/// Test module/path anchors for I1–I10 (issue #89; all linked to executable tests).
+///
+/// Format: `cargo_module_path` → `source_file` (stable discovery string).
 pub const PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS: &[&str] = &[
-    "src/core/protocol_invariants.rs#i1_same_block_state_diff",
-    "src/core/protocol_invariants.rs#i2_invalid_signature_never_executable",
-    "src/core/protocol_invariants.rs#i3_nonce_cannot_decrease",
-    "src/core/protocol_invariants.rs#i4_balance_cannot_become_negative",
-    "tests/protocol_invariants_i5_i10_test.rs#i5_tokens_xp_persist",
-    "tests/protocol_invariants_i5_i10_test.rs#i6_finalized_block_not_applied_twice",
-    "tests/protocol_invariants_i5_i10_test.rs#i7_conflict_cannot_overwrite_canonical",
-    "tests/protocol_invariants_i5_i10_test.rs#i8_failed_commit_no_partial_state",
-    "tests/protocol_invariants_i5_i10_test.rs#i9_restart_preserves_canonical",
-    "tests/protocol_invariants_i5_i10_test.rs#i10_core_error_not_consensus_accept",
+    "core::protocol_invariants::tests::i1_same_block_state_diff → src/core/protocol_invariants.rs",
+    "core::protocol_invariants::tests::i2_invalid_signature_never_executable → src/core/protocol_invariants.rs",
+    "core::protocol_invariants::tests::i3_nonce_cannot_decrease → src/core/protocol_invariants.rs",
+    "core::protocol_invariants::tests::i4_balance_cannot_become_negative → src/core/protocol_invariants.rs",
+    "protocol_invariants_i5_i10::i5_tokens_xp_persist → tests/protocol_invariants_i5_i10_test.rs",
+    "protocol_invariants_i5_i10::i6_finalized_block_not_applied_twice → tests/protocol_invariants_i5_i10_test.rs",
+    "protocol_invariants_i5_i10::i7_conflict_cannot_overwrite_canonical → tests/protocol_invariants_i5_i10_test.rs",
+    "protocol_invariants_i5_i10::i8_failed_commit_no_partial_state → tests/protocol_invariants_i5_i10_test.rs",
+    "protocol_invariants_i5_i10::i9_restart_preserves_canonical → tests/protocol_invariants_i5_i10_test.rs",
+    "protocol_invariants_i5_i10::i10_core_error_not_consensus_accept → tests/protocol_invariants_i5_i10_test.rs",
 ];
+
+/// Documented `cargo test` / CI invocation for I1–I10 (issue #89).
+pub const PROTOCOL_INVARIANT_CARGO_TEST_INVOCATION: &str = concat!(
+    "cargo test --lib core::protocol_invariants::; ",
+    "cargo test --test protocol_invariants_i5_i10"
+);
 
 #[cfg(test)]
 mod tests {
@@ -160,18 +185,43 @@ mod tests {
         for (idx, path) in PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS.iter().enumerate() {
             assert!(
                 path.contains(&format!("i{}", idx + 1)),
-                "placeholder path must reference i{}: {path}",
+                "test path must reference i{}: {path}",
                 idx + 1
+            );
+            assert!(
+                path.contains(" → "),
+                "test path must link module → file: {path}"
+            );
+            assert!(
+                !path.contains('…'),
+                "test path must not be a placeholder: {path}"
             );
         }
         assert!(
             GATEWAY_CORE_ERROR_NOT_ACCEPT_DOC.contains("must not be mapped to consensus accept"),
             "I10 Gateway consumer doc missing"
         );
+        assert!(
+            PROTOCOL_INVARIANT_CARGO_TEST_INVOCATION.contains("cargo test --lib core::protocol_invariants::"),
+            "CI/cargo invocation must document I1–I4 lib tests"
+        );
+        assert!(
+            PROTOCOL_INVARIANT_CARGO_TEST_INVOCATION
+                .contains("cargo test --test protocol_invariants_i5_i10"),
+            "CI/cargo invocation must document I5–I10 integration tests"
+        );
+        assert!(PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS[0]
+            .contains("core::protocol_invariants::tests::i1_same_block_state_diff"));
+        assert!(PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS[0]
+            .contains("src/core/protocol_invariants.rs"));
         assert!(PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS[4]
-            .contains("protocol_invariants_i5_i10_test.rs#i5_"));
+            .contains("protocol_invariants_i5_i10::i5_tokens_xp_persist"));
+        assert!(PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS[4]
+            .contains("tests/protocol_invariants_i5_i10_test.rs"));
         assert!(PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS[9]
-            .contains("protocol_invariants_i5_i10_test.rs#i10_"));
+            .contains("protocol_invariants_i5_i10::i10_core_error_not_consensus_accept"));
+        assert!(PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS[9]
+            .contains("tests/protocol_invariants_i5_i10_test.rs"));
     }
 
     /// Issue #79 / I1: same block + state → identical StateDiff (fails if diverges).

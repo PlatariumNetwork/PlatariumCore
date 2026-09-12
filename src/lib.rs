@@ -207,7 +207,7 @@ pub use core::replay::{
 pub use core::protocol_notes::{NOW_UNIX_IS_WALL_CLOCK, THREE_CLOCK_SPLIT_DOC};
 pub use core::protocol_invariants::{
     GATEWAY_CORE_ERROR_NOT_ACCEPT_DOC, PROTOCOL_INVARIANTS_DOC,
-    PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS,
+    PROTOCOL_INVARIANT_CARGO_TEST_INVOCATION, PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS,
 };
 pub use core::failpoints::{
     arm as failpoint_arm, clear as failpoint_clear, clear_all as failpoint_clear_all, hit as failpoint_hit,
