@@ -1179,7 +1179,9 @@ impl State {
                 let rid = tx
                     .escrow_id()
                     .ok_or_else(|| StateError::Escrow("missing escrow_id".into()))?;
-                let outcome_key = tx.settle_outcome_key();
+                let outcome_key = tx
+                    .settle_outcome_key()
+                    .map_err(StateError::Escrow)?;
                 // R2-H5: settler-supplied settle_payee/settle_node are ignored when
                 // lock-time bindings exist (`bind_settle_addresses`).
                 let bindings = AddressBindings {

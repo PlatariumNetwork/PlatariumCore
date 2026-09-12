@@ -126,10 +126,14 @@ fn parse_accounts_for_migration(
     let mut bal = std::collections::BTreeMap::<String, String>::new();
     let mut uplp = std::collections::BTreeMap::<String, String>::new();
     let mut nonces = std::collections::BTreeMap::<String, u64>::new();
+    let mut tokens =
+        std::collections::BTreeMap::<String, std::collections::BTreeMap<String, String>>::new();
 
     for (addr, asset, balance) in state.asset_balances {
         if asset == "PLP" {
             bal.insert(addr, balance);
+        } else {
+            tokens.entry(addr).or_default().insert(asset, balance);
         }
     }
     for (addr, balance) in state.uplp_balances {
@@ -142,14 +146,25 @@ fn parse_accounts_for_migration(
     let mut addrs: std::collections::BTreeSet<String> = bal.keys().cloned().collect();
     addrs.extend(uplp.keys().cloned());
     addrs.extend(nonces.keys().cloned());
+    addrs.extend(tokens.keys().cloned());
 
+    let xp_key = crate::core::asset::Asset::xp().as_canonical();
     Ok(addrs
         .into_iter()
-        .map(|address| crate::storage::commit::AccountRecord {
-            balance: bal.get(&address).cloned().unwrap_or_else(|| "0".into()),
-            uplp_balance: uplp.get(&address).cloned().unwrap_or_else(|| "0".into()),
-            nonce: nonces.get(&address).copied().unwrap_or(0),
-            address,
+        .map(|address| {
+            let tok = tokens.remove(&address).unwrap_or_default();
+            let xp = tok
+                .get(&xp_key)
+                .cloned()
+                .unwrap_or_else(|| "0".into());
+            crate::storage::commit::AccountRecord {
+                balance: bal.get(&address).cloned().unwrap_or_else(|| "0".into()),
+                uplp_balance: uplp.get(&address).cloned().unwrap_or_else(|| "0".into()),
+                nonce: nonces.get(&address).copied().unwrap_or(0),
+                tokens: tok,
+                xp,
+                address,
+            }
         })
         .collect())
 }

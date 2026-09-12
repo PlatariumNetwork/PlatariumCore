@@ -134,12 +134,16 @@ fn make_commit(height: u64, hashes: &[&str], fees: &[u64]) -> BlockCommit {
                 balance: "100".into(),
                 uplp_balance: "0".into(),
                 nonce: hashes.len() as u64,
+                tokens: Default::default(),
+                xp: "0".into(),
             },
             AccountRecord {
                 address: "PxB".into(),
                 balance: hashes.len().to_string(),
                 uplp_balance: "0".into(),
                 nonce: 0,
+                tokens: Default::default(),
+                xp: "0".into(),
             },
         ],
         receipts: hashes
@@ -281,6 +285,8 @@ fn snapshot_at_interval_and_bootstrap() {
                 balance: "42".into(),
                 uplp_balance: "0".into(),
                 nonce: 3,
+                tokens: Default::default(),
+                xp: "0".into(),
             })
             .unwrap(),
         )

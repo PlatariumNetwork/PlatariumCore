@@ -174,8 +174,26 @@ fn is_secret_method(method: &str) -> bool {
     SECRET_METHODS.iter().any(|m| *m == method)
 }
 
+/// Constant-time equality for auth tokens (R2-L1). Length mismatches still
+/// short-circuit (token length is not secret), but equal-length compares are
+/// byte-wise XOR accumulated without early exit.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    // Prevent the compiler from short-circuiting the loop via early return.
+    std::hint::black_box(diff) == 0
+}
+
 fn token_matches(provided: Option<&str>, expected: &str) -> bool {
-    matches!(provided, Some(t) if t == expected)
+    match provided {
+        Some(t) => constant_time_eq(t.as_bytes(), expected.as_bytes()),
+        None => false,
+    }
 }
 
 /// Enforce auth for a JSON-RPC method. `auth_token` is taken from the request top-level field.
@@ -268,11 +286,12 @@ pub fn authorize_rocks_admin_token(admin_token: Option<&str>) -> Result<()> {
                 .into(),
         ));
     };
-    match admin_token {
-        Some(t) if t == expected => Ok(()),
-        _ => Err(PlatariumError::State(
+    if token_matches(admin_token, &expected) {
+        Ok(())
+    } else {
+        Err(PlatariumError::State(
             "RPC unauthorized: missing or invalid admin_token".into(),
-        )),
+        ))
     }
 }
 

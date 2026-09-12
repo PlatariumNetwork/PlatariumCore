@@ -57,15 +57,59 @@ fn lock_or_poison(m: &Mutex<()>) -> Result<std::sync::MutexGuard<'_, ()>> {
     }
 }
 
+/// Stable lock key for `state_file` / `db_path` so relative paths, absolutes, and
+/// symlinks that resolve to the same inode share one mutex (R2-M3).
+fn path_lock_key(path: &str) -> String {
+    let p = Path::new(path);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(meta) = std::fs::metadata(p) {
+            return format!("ino:{}:{}", meta.dev(), meta.ino());
+        }
+        // File may not exist yet — canonicalize parent + basename when possible.
+        if let Some(parent) = p.parent().filter(|par| !par.as_os_str().is_empty()) {
+            if let (Ok(meta), Some(name)) = (std::fs::metadata(parent), p.file_name()) {
+                return format!(
+                    "dirino:{}:{}:{}",
+                    meta.dev(),
+                    meta.ino(),
+                    name.to_string_lossy()
+                );
+            }
+            if let (Ok(canon), Some(name)) = (std::fs::canonicalize(parent), p.file_name()) {
+                return format!("path:{}", canon.join(name).to_string_lossy());
+            }
+        }
+    }
+    if let Ok(canon) = std::fs::canonicalize(p) {
+        return format!("path:{}", canon.to_string_lossy());
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        return format!("path:{}", cwd.join(p).to_string_lossy());
+    }
+    format!("path:{}", path)
+}
+
+fn path_param_for_lock(params: &Value) -> Option<&str> {
+    params
+        .get("state_file")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            params
+                .get("db_path")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+        })
+}
+
 fn with_dispatch_lock<R>(method: &str, params: &Value, f: impl FnOnce() -> R) -> Result<R> {
     if method == "ping" || method == "handshake" {
         return Ok(f());
     }
-    if let Some(path) = params
-        .get("state_file")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(path) = path_param_for_lock(params) {
+        let key = path_lock_key(path);
         let arc = {
             let mut map = match state_path_locks().lock() {
                 Ok(g) => g,
@@ -78,7 +122,7 @@ fn with_dispatch_lock<R>(method: &str, params: &Value, f: impl FnOnce() -> R) ->
                     return Err(PlatariumError::State("RPC state-lock map poisoned".into()));
                 }
             };
-            map.entry(path.to_string())
+            map.entry(key)
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
@@ -152,16 +196,22 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
     match method {
         "ping" => Ok(json!({"ok": true, "service": "platarium-core-rpc", "version": "1.3.0"}).to_string()),
         "handshake" => {
-            // H11: version + auth-aware hello (Gateway must not treat bare ping as full trust).
-            Ok(json!({
+            // H11 / R2-L3: unauthenticated hello is minimal — no capability flags.
+            // remote_sign / testnet are disclosed only when a valid auth_token is present.
+            let mut out = json!({
                 "ok": true,
                 "service": "platarium-core-rpc",
                 "version": "1.3.0",
                 "protocol": 2,
-                "remote_sign": crate::core::rpc_security::remote_sign_allowed(),
-                "testnet": crate::core::rpc_security::server_testnet_enabled(),
-            })
-            .to_string())
+            });
+            let token = params.get("auth_token").and_then(|v| v.as_str());
+            let caps_ok = crate::core::rpc_security::rpc_insecure_allowed()
+                || crate::core::rpc_security::authorize_rpc_method("state_query", token).is_ok();
+            if caps_ok {
+                out["remote_sign"] = json!(crate::core::rpc_security::remote_sign_allowed());
+                out["testnet"] = json!(crate::core::rpc_security::server_testnet_enabled());
+            }
+            Ok(out.to_string())
         }
 
         "block_cycle" => block_cycle_json(params),
@@ -1192,7 +1242,22 @@ pub fn handle_rpc_line(line: &str) -> String {
         .to_string();
     }
 
-    let dispatched = match with_dispatch_lock(method, &params, || dispatch_rpc(method, &params)) {
+    // R2-L3: forward top-level auth_token into handshake params for capability gating.
+    let params_for_dispatch = if method == "handshake" {
+        let mut p = params.clone();
+        if let Some(t) = auth_token {
+            if p.get("auth_token").and_then(|v| v.as_str()).is_none() {
+                p["auth_token"] = json!(t);
+            }
+        }
+        p
+    } else {
+        params.clone()
+    };
+
+    let dispatched = match with_dispatch_lock(method, &params_for_dispatch, || {
+        dispatch_rpc(method, &params_for_dispatch)
+    }) {
         Ok(inner) => inner,
         Err(e) => {
             return json!({

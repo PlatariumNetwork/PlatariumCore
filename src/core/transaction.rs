@@ -232,15 +232,26 @@ impl Transaction {
     }
 
     /// Rules outcome key for settle.
-    pub fn settle_outcome_key(&self) -> String {
-        if let Some(k) = self.settle_outcome_key.as_ref() {
-            return k.clone();
+    ///
+    /// R2-M4: fail-closed — settle kinds must supply `settle_outcome_key` or a known
+    /// `settle_outcome` code. Missing values no longer default to `"accept"`.
+    pub fn settle_outcome_key(&self) -> std::result::Result<String, String> {
+        if let Some(k) = self
+            .settle_outcome_key
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            return Ok(k.to_string());
         }
         match self.settle_outcome {
-            Some(0) => "accept".into(),
-            Some(1) => "timeout".into(),
-            Some(2) => "reject".into(),
-            _ => "accept".into(),
+            Some(0) => Ok("accept".into()),
+            Some(1) => Ok("timeout".into()),
+            Some(2) => Ok("reject".into()),
+            Some(n) => Err(format!("unknown settle_outcome code: {n}")),
+            None => Err(
+                "settle requires explicit settle_outcome_key or settle_outcome".into(),
+            ),
         }
     }
     

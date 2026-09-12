@@ -195,7 +195,7 @@ impl ExecutionLogic {
                 let rid = tx.escrow_id().ok_or_else(|| {
                     PlatariumError::State("missing escrow_id".into())
                 })?;
-                let key = tx.settle_outcome_key();
+                let key = tx.settle_outcome_key().map_err(PlatariumError::State)?;
                 // R2-H5: lock-time bindings win over settler-supplied payee/node.
                 let bindings = AddressBindings {
                     sender: String::new(),

@@ -14,6 +14,11 @@ use crate::storage::schema::{
 use crate::storage::snapshot::create_snapshot_if_due;
 use rocksdb::WriteBatch;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+fn default_xp() -> String {
+    "0".into()
+}
 
 /// Gate for Rocks commits attached to a verified execution path (R2-H1).
 ///
@@ -54,6 +59,12 @@ pub struct AccountRecord {
     pub balance: String,
     pub uplp_balance: String,
     pub nonce: u64,
+    /// Non-PLP token balances (canonical asset key → decimal string). Sorted via BTreeMap.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tokens: BTreeMap<String, String>,
+    /// Contributor XP balance as decimal string (`Token:XP`, default `"0"`).
+    #[serde(default = "default_xp")]
+    pub xp: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -215,12 +226,16 @@ mod tests {
                     balance: "90".into(),
                     uplp_balance: "0".into(),
                     nonce: 1,
+                    tokens: BTreeMap::new(),
+                    xp: "0".into(),
                 },
                 AccountRecord {
                     address: "PxB".into(),
                     balance: "10".into(),
                     uplp_balance: "0".into(),
                     nonce: 0,
+                    tokens: BTreeMap::new(),
+                    xp: "0".into(),
                 },
             ],
             receipts: vec![ReceiptRecord {
@@ -278,5 +293,43 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("state_root"), "{err}");
         assert!(assert_commit_allowed_after_execution(false, None, &json, true).is_ok());
+    }
+
+    #[test]
+    fn account_record_serializes_tokens_and_xp() {
+        let mut tokens = BTreeMap::new();
+        tokens.insert("Token:XP".into(), "150".into());
+        tokens.insert("Token:USDT".into(), "42".into());
+        let rec = AccountRecord {
+            address: "PxA".into(),
+            balance: "100".into(),
+            uplp_balance: "5".into(),
+            nonce: 2,
+            tokens,
+            xp: "150".into(),
+        };
+        let json = serde_json::to_value(&rec).unwrap();
+        assert_eq!(json["xp"], "150");
+        assert_eq!(json["tokens"]["Token:XP"], "150");
+        assert_eq!(json["tokens"]["Token:USDT"], "42");
+
+        let round: AccountRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(round.xp, "150");
+        assert_eq!(
+            round.tokens.get("Token:XP").map(String::as_str),
+            Some("150")
+        );
+        assert_eq!(
+            round.tokens.get("Token:USDT").map(String::as_str),
+            Some("42")
+        );
+
+        // Legacy records without tokens/xp still deserialize.
+        let legacy: AccountRecord = serde_json::from_str(
+            r#"{"address":"PxB","balance":"1","uplp_balance":"0","nonce":0}"#,
+        )
+        .unwrap();
+        assert!(legacy.tokens.is_empty());
+        assert_eq!(legacy.xp, "0");
     }
 }

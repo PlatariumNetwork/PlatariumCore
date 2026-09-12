@@ -58,6 +58,9 @@ fn c2_rpc_auth_rejects_privileged_without_token() {
     assert!(authorize_rpc_method("state_credit", None).is_err());
     assert!(authorize_rpc_method("state_credit", Some("wrong")).is_err());
     assert!(authorize_rpc_method("state_credit", Some("crit-token")).is_ok());
+    assert!(authorize_rpc_method("state_credit_token", None).is_err());
+    assert!(authorize_rpc_method("state_credit_token", Some("wrong")).is_err());
+    assert!(authorize_rpc_method("state_credit_token", Some("crit-token")).is_ok());
     let denied = handle_rpc_line(
         r#"{"jsonrpc":"2.0","id":1,"method":"state_query","params":{"state_file":"x","address":"a"}}"#,
     );

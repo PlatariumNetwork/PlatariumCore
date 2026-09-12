@@ -274,11 +274,18 @@ impl StorageEngine for RocksAccountStorageEngine {
         let store = open_cached(&self.db_path)?;
         let mut batch = rocksdb::WriteBatch::default();
         for a in &self.staging {
+            let xp = a
+                .token_balances
+                .get(&crate::core::asset::Asset::xp().as_canonical())
+                .cloned()
+                .unwrap_or_else(|| "0".into());
             let rec = AccountRecord {
                 address: a.address.clone(),
                 balance: a.plp_balance.clone(),
                 uplp_balance: a.uplp_balance.clone(),
                 nonce: a.nonce,
+                tokens: a.token_balances.clone(),
+                xp,
             };
             let bytes = serde_json::to_vec(&rec)
                 .map_err(|e| PlatariumError::State(format!("encode account: {}", e)))?;
@@ -328,7 +335,7 @@ impl StorageEngine for RocksAccountStorageEngine {
             plp_balance: rec.balance,
             uplp_balance: rec.uplp_balance,
             nonce: rec.nonce,
-            token_balances: Default::default(),
+            token_balances: rec.tokens,
         })
     }
 }

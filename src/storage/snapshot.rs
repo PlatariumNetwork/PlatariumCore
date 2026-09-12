@@ -130,6 +130,8 @@ mod tests {
                     balance: "1".into(),
                     uplp_balance: "0".into(),
                     nonce: 0,
+                    tokens: Default::default(),
+                    xp: "0".into(),
                 })
                 .unwrap(),
             )
