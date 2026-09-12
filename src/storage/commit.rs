@@ -194,7 +194,20 @@ pub fn commit_block(store: &RocksStore, commit: &BlockCommit) -> Result<()> {
     }
 
     for acct in &commit.accounts {
-        let bytes = serde_json::to_vec(acct)
+        let mut rec = acct.clone();
+        // Issue #38: balance-only AccountRecord (empty tokens + default xp) must not
+        // wipe durable tokens/xp already stored for this address.
+        if rec.tokens.is_empty() && (rec.xp.is_empty() || rec.xp == "0") {
+            if let Ok(Some(existing)) = crate::storage::query::get_account(store, &rec.address) {
+                rec = account_rmw_preserve_tokens_xp(
+                    &existing,
+                    rec.balance,
+                    rec.uplp_balance,
+                    rec.nonce,
+                );
+            }
+        }
+        let bytes = serde_json::to_vec(&rec)
             .map_err(|e| PlatariumError::State(format!("encode account: {}", e)))?;
         batch.put(key_account(&acct.address), bytes);
     }

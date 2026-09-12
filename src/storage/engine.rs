@@ -8,7 +8,7 @@ use crate::core::state::State;
 use crate::core::state_file::{load_state_file, save_state_file};
 use crate::error::{PlatariumError, Result};
 use crate::storage::cache::open_cached;
-use crate::storage::commit::AccountRecord;
+use crate::storage::commit::{account_rmw_preserve_tokens_xp, AccountRecord};
 use crate::storage::query::get_account;
 use crate::storage::schema::{key_account, key_escrow, KEY_META_ESCROWS, PREFIX_ESCROW};
 use std::collections::HashMap;
@@ -294,7 +294,19 @@ impl StorageEngine for RocksAccountStorageEngine {
         let store = open_cached(&self.db_path)?;
         let mut batch = rocksdb::WriteBatch::default();
         for a in &self.staging {
-            let rec = account_record_from_post_image(a);
+            let mut rec = account_record_from_post_image(a);
+            // Issue #38: balance-only post-images (empty token_balances) must not
+            // silently zero durable tokens/xp already on disk.
+            if a.token_balances.is_empty() {
+                if let Ok(Some(existing)) = get_account(store.as_ref(), &a.address) {
+                    rec = account_rmw_preserve_tokens_xp(
+                        &existing,
+                        rec.balance,
+                        rec.uplp_balance,
+                        rec.nonce,
+                    );
+                }
+            }
             let bytes = serde_json::to_vec(&rec)
                 .map_err(|e| PlatariumError::State(format!("encode account: {}", e)))?;
             batch.put(key_account(&a.address), bytes);
@@ -524,4 +536,144 @@ mod tests {
         );
         evict_cached(&db_path);
     }
+
+    /// Issue #37: golden restart — tokens=100 xp=250 survive StateDiff → Rocks → reopen.
+    #[test]
+    fn golden_restart_tokens_100_xp_250() {
+        use crate::core::kernel::commit_engine::commit_state_diff;
+        use crate::core::kernel::state_diff::{StateDiff, STATE_DIFF_SCHEMA_VERSION};
+        use crate::core::state_file::{init_state_file, load_state_file, save_state_file};
+        use crate::storage::cache::evict_cached;
+        use crate::storage::commit::AccountRecord;
+        use std::collections::BTreeMap;
+
+        let dir = TempDir::new().unwrap();
+        let state_path = dir.path().join("state.json");
+        init_state_file(&state_path).unwrap();
+        let state = load_state_file(&state_path).unwrap();
+        state.set_balance(&"PxGolden".to_string(), 5000);
+        state.set_uplp_balance(&"PxGolden".to_string(), 1);
+        state.set_nonce(&"PxGolden".to_string(), 0);
+        state.set_asset_balance(&"PxGolden".to_string(), &Asset::Token("USDT".into()), 100);
+        state.set_asset_balance(&"PxGolden".to_string(), &Asset::xp(), 250);
+        save_state_file(&state_path, &state).unwrap();
+
+        let mut tokens = BTreeMap::new();
+        tokens.insert("Token:USDT".into(), "100".into());
+        tokens.insert(Asset::xp().as_canonical(), "250".into());
+        let image = AccountPostImage {
+            address: "PxGolden".into(),
+            plp_balance: "5000".into(),
+            uplp_balance: "1".into(),
+            nonce: 0,
+            token_balances: tokens,
+        };
+        assert_eq!(account_record_from_post_image(&image).xp, "250");
+
+        let db_path = dir.path().join("rocks");
+        {
+            let mut eng = RocksAccountStorageEngine::open(&db_path).unwrap();
+            let diff = StateDiff {
+                schema_version: STATE_DIFF_SCHEMA_VERSION,
+                batch_id: "golden-100-250".into(),
+                receipts: vec![],
+                accounts: vec![image],
+                pre_state_root: None,
+                post_state_root: "root-golden".into(),
+                escrows_json: None,
+            };
+            let res = commit_state_diff(&mut eng, &diff).unwrap();
+            assert!(res.ok, "{:?}", res.error);
+        }
+        evict_cached(&db_path);
+
+        // Restart: reopen Rocks; values must equal 100 / 250 (not silently dropped).
+        let eng = RocksAccountStorageEngine::open(&db_path).unwrap();
+        let got = eng.get_account("PxGolden").unwrap();
+        assert_eq!(
+            got.token_balances.get("Token:USDT").map(String::as_str),
+            Some("100"),
+            "tokens silently dropped by WriteBatch/restart"
+        );
+        assert_eq!(
+            got.token_balances
+                .get(&Asset::xp().as_canonical())
+                .map(String::as_str),
+            Some("250"),
+            "xp silently dropped by WriteBatch/restart"
+        );
+        let store = crate::storage::cache::open_cached(&db_path).unwrap();
+        let raw = store.get(&key_account("PxGolden")).unwrap().unwrap();
+        let rec: AccountRecord = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(rec.xp, "250");
+        assert_eq!(rec.tokens.get("Token:USDT").map(String::as_str), Some("100"));
+        evict_cached(&db_path);
+    }
+
+    /// Issue #38: balance-only StateDiff update must retain prior tokens/xp on Rocks.
+    #[test]
+    fn balance_only_update_preserves_tokens_xp_on_rocks() {
+        use crate::core::kernel::commit_engine::commit_state_diff;
+        use crate::core::kernel::state_diff::{StateDiff, STATE_DIFF_SCHEMA_VERSION};
+        use crate::storage::cache::evict_cached;
+        use std::collections::BTreeMap;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("rocks");
+        let mut eng = RocksAccountStorageEngine::open(&db_path).unwrap();
+
+        let mut tokens = BTreeMap::new();
+        tokens.insert(Asset::xp().as_canonical(), "250".into());
+        tokens.insert("Token:USDT".into(), "99".into());
+        let seed = StateDiff {
+            schema_version: STATE_DIFF_SCHEMA_VERSION,
+            batch_id: "seed".into(),
+            receipts: vec![],
+            accounts: vec![AccountPostImage {
+                address: "PxBal".into(),
+                plp_balance: "1000".into(),
+                uplp_balance: "10".into(),
+                nonce: 3,
+                token_balances: tokens.clone(),
+            }],
+            pre_state_root: None,
+            post_state_root: "r1".into(),
+            escrows_json: None,
+        };
+        assert!(commit_state_diff(&mut eng, &seed).unwrap().ok);
+
+        // Balance-only post-image (empty token_balances) — must not zero tokens/xp.
+        let bal_only = StateDiff {
+            schema_version: STATE_DIFF_SCHEMA_VERSION,
+            batch_id: "bal-only".into(),
+            receipts: vec![],
+            accounts: vec![AccountPostImage {
+                address: "PxBal".into(),
+                plp_balance: "900".into(),
+                uplp_balance: "9".into(),
+                nonce: 4,
+                token_balances: BTreeMap::new(),
+            }],
+            pre_state_root: None,
+            post_state_root: "r2".into(),
+            escrows_json: None,
+        };
+        assert!(commit_state_diff(&mut eng, &bal_only).unwrap().ok);
+        let got = eng.get_account("PxBal").unwrap();
+        assert_eq!(got.plp_balance, "900");
+        assert_eq!(got.uplp_balance, "9");
+        assert_eq!(got.nonce, 4);
+        assert_eq!(
+            got.token_balances.get(&Asset::xp().as_canonical()).map(String::as_str),
+            Some("250"),
+            "xp zeroed by balance-only update"
+        );
+        assert_eq!(
+            got.token_balances.get("Token:USDT").map(String::as_str),
+            Some("99"),
+            "tokens zeroed by balance-only update"
+        );
+        evict_cached(&db_path);
+    }
+
 }

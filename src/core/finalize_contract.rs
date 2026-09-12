@@ -335,4 +335,140 @@ mod tests {
         assert_eq!(res.phase, FinalizePhase::Execute);
         assert_eq!(mem.get_account(&alice).unwrap().plp_balance, "1");
     }
+
+    /// Issue #42: COMMITTED only after durable persist success.
+    #[test]
+    fn persist_marks_committed_only_after_durable_success() {
+        let (mn, alpha, alice) = wallet();
+        let bob = "PxBobFinalizeOk0000000000000000000000000000000000000000000000001";
+        let state = State::new();
+        state.set_balance(&alice, 5000);
+        state.set_uplp_balance(&alice, 10);
+        state.set_nonce(&alice, 0);
+        let tx = signed_tx(&mn, &alpha, &alice, bob, 50, 1, 0);
+        let batch = OrderedBatch::new("f-ok".into(), 1, vec![tx]).unwrap();
+
+        let mut mem = InMemoryStorageEngine::from_state(&state);
+        let (res, commit) =
+            finalize_to_storage(&state, &batch, ExecuteOptions::default(), &mut mem).unwrap();
+        assert!(res.ok, "{:?}", res.error);
+        assert!(res.persisted);
+        assert_eq!(res.phase, FinalizePhase::Committed);
+        let commit = commit.expect("commit result present");
+        assert!(commit.ok);
+        assert_eq!(mem.get_account(&alice).unwrap().plp_balance, "4950");
+        assert_eq!(mem.get_account(&alice).unwrap().nonce, 1);
+    }
+
+    /// Issue #42: partial persist (commit_atomic failure) must not mark COMMITTED.
+    #[test]
+    fn partial_persist_does_not_mark_committed() {
+        struct FailCommitEngine {
+            inner: InMemoryStorageEngine,
+        }
+        impl StorageEngine for FailCommitEngine {
+            fn begin(&mut self) -> Result<()> {
+                self.inner.begin()
+            }
+            fn apply_accounts(
+                &mut self,
+                accounts: &[crate::core::kernel::AccountPostImage],
+            ) -> Result<()> {
+                self.inner.apply_accounts(accounts)
+            }
+            fn apply_escrows(&mut self, escrows_json: &[String]) -> Result<()> {
+                self.inner.apply_escrows(escrows_json)
+            }
+            fn commit_atomic(&mut self) -> Result<()> {
+                let _ = self.inner.rollback();
+                Err(PlatariumError::State("simulated durable persist failure".into()))
+            }
+            fn rollback(&mut self) -> Result<()> {
+                self.inner.rollback()
+            }
+            fn get_account(
+                &self,
+                address: &str,
+            ) -> Option<crate::core::kernel::AccountPostImage> {
+                self.inner.get_account(address)
+            }
+        }
+
+        let (mn, alpha, alice) = wallet();
+        let bob = "PxBobFinalizePartial00000000000000000000000000000000000000001";
+        let state = State::new();
+        state.set_balance(&alice, 5000);
+        state.set_uplp_balance(&alice, 10);
+        state.set_nonce(&alice, 0);
+        let tx = signed_tx(&mn, &alpha, &alice, bob, 50, 1, 0);
+        let batch = OrderedBatch::new("f-partial".into(), 1, vec![tx]).unwrap();
+
+        let mut eng = FailCommitEngine {
+            inner: InMemoryStorageEngine::from_state(&state),
+        };
+        let err = finalize_to_storage(&state, &batch, ExecuteOptions::default(), &mut eng)
+            .expect_err("persist failure must surface");
+        assert!(
+            err.to_string().contains("durable persist") || err.to_string().contains("simulated"),
+            "{err}"
+        );
+        // Prior committed state unchanged (rollback on failed commit_atomic).
+        assert_eq!(eng.get_account(&alice).unwrap().plp_balance, "5000");
+        assert_eq!(eng.get_account(&alice).unwrap().nonce, 0);
+    }
+
+    /// Issue #43: forced execution failure leaves account + height (batch) unchanged.
+    #[test]
+    fn execution_failure_leaves_no_account_or_height_mutation() {
+        use crate::storage::cache::{evict_cached, open_cached};
+        use crate::storage::engine::RocksAccountStorageEngine;
+        use crate::storage::query::get_head;
+        use tempfile::TempDir;
+
+        let (mn, alpha, alice) = wallet();
+        let bob = "PxBobExecFailHeight0000000000000000000000000000000000000001";
+        let state = State::new();
+        state.set_balance(&alice, 100);
+        state.set_uplp_balance(&alice, 10);
+        state.set_nonce(&alice, 2);
+        let tx = signed_tx(&mn, &alpha, &alice, bob, 50_000, 1, 2); // will fail balance
+        let batch = OrderedBatch::new("exec-fail".into(), 7, vec![tx]).unwrap();
+        assert_eq!(batch.height, 7);
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("rocks");
+        let mut eng = RocksAccountStorageEngine::open(&db_path).unwrap();
+        // Seed prior account so we can prove no mutation.
+        eng.begin().unwrap();
+        eng.apply_accounts(&[crate::core::kernel::AccountPostImage {
+            address: alice.clone(),
+            plp_balance: "100".into(),
+            uplp_balance: "10".into(),
+            nonce: 2,
+            token_balances: Default::default(),
+        }])
+        .unwrap();
+        eng.commit_atomic().unwrap();
+        {
+            let store = open_cached(&db_path).unwrap();
+            assert_eq!(get_head(store.as_ref()).unwrap(), 0);
+        }
+
+        let (res, commit) =
+            finalize_to_storage(&state, &batch, ExecuteOptions::default(), &mut eng).unwrap();
+        assert!(!res.ok);
+        assert!(!res.persisted);
+        assert!(commit.is_none());
+        assert_eq!(res.phase, FinalizePhase::Execute);
+        let got = eng.get_account(&alice).unwrap();
+        assert_eq!(got.plp_balance, "100");
+        assert_eq!(got.nonce, 2);
+        let store = open_cached(&db_path).unwrap();
+        assert_eq!(
+            get_head(store.as_ref()).unwrap(),
+            0,
+            "height must not advance on execute fail"
+        );
+        evict_cached(&db_path);
+    }
 }

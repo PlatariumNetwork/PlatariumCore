@@ -105,7 +105,11 @@ pub fn l1_verify_txs_json(path: &Path, txs_json: &str) -> Result<String> {
 }
 
 /// Aggregate L1 votes. Input: JSON array of {"node_id":"...","yes":true|false}.
+///
+/// These tallies are unsigned trust-the-caller helpers (solo/dev). Multi-node
+/// fail-closes this path (issue #50); use signed confirmation APIs instead.
 pub fn l1_process_votes_json(votes_json: &str) -> Result<String> {
+    crate::core::runtime_gates::assert_unsigned_votes_allowed()?;
     let raw: Vec<serde_json::Value> = serde_json::from_str(votes_json)
         .map_err(|e| PlatariumError::State(format!("invalid votes JSON: {}", e)))?;
     let mut votes: Vec<(String, Vote)> = Vec::new();
@@ -137,7 +141,9 @@ pub fn l1_process_votes_json(votes_json: &str) -> Result<String> {
 }
 
 /// Aggregate L2 block votes. Input: same shape as L1 votes.
+/// Multi-node fail-closes unsigned tallies (issue #50).
 pub fn l2_process_votes_json(votes_json: &str) -> Result<String> {
+    crate::core::runtime_gates::assert_unsigned_votes_allowed()?;
     let raw: Vec<serde_json::Value> = serde_json::from_str(votes_json)
         .map_err(|e| PlatariumError::State(format!("invalid votes JSON: {}", e)))?;
     let mut votes: Vec<(String, Vote)> = Vec::new();

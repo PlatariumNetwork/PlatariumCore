@@ -67,7 +67,11 @@ pub fn dag_reset_allowed() -> bool {
 }
 
 /// Allow unsigned DAG vertices (`PLATARIUM_DAG_ALLOW_UNSIGNED=1`). Default: require sig on RPC insert.
+/// Multi-node always fail-closed (issue #51) even if the env flag is set.
 pub fn dag_unsigned_allowed() -> bool {
+    if crate::core::runtime_gates::multi_node_enabled() {
+        return false;
+    }
     env_truthy("PLATARIUM_DAG_ALLOW_UNSIGNED") || cfg!(test)
 }
 
@@ -80,7 +84,11 @@ pub fn rpc_poison_recover_allowed() -> bool {
 pub const MAX_RPC_LINE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Allow remote keygen/sign over JSON-RPC (`PLATARIUM_CORE_ALLOW_REMOTE_SIGN=1`).
+/// Multi-node always fail-closed (issue #50) even if the env flag is set.
 pub fn remote_sign_allowed() -> bool {
+    if crate::core::runtime_gates::multi_node_enabled() {
+        return false;
+    }
     env_truthy("PLATARIUM_CORE_ALLOW_REMOTE_SIGN")
 }
 
@@ -408,6 +416,23 @@ mod tests {
         assert!(!external_rocks_commit_allowed());
         assert!(!rocks_migrate_allowed());
         assert!(!rocks_bootstrap_allowed());
+    }
+
+    #[test]
+    fn multi_node_hard_gates_remote_sign_and_unsigned_dag() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("PLATARIUM_CORE_MULTI_NODE");
+        std::env::set_var("PLATARIUM_CORE_ALLOW_REMOTE_SIGN", "1");
+        std::env::set_var("PLATARIUM_DAG_ALLOW_UNSIGNED", "1");
+        assert!(remote_sign_allowed());
+        assert!(dag_unsigned_allowed());
+        std::env::set_var("PLATARIUM_CORE_MULTI_NODE", "1");
+        assert!(!remote_sign_allowed());
+        assert!(!dag_unsigned_allowed());
+        assert!(authorize_rpc_method("sign_transaction", None).is_err());
+        std::env::remove_var("PLATARIUM_CORE_MULTI_NODE");
+        std::env::remove_var("PLATARIUM_CORE_ALLOW_REMOTE_SIGN");
+        std::env::remove_var("PLATARIUM_DAG_ALLOW_UNSIGNED");
     }
 
     #[test]

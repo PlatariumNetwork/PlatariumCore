@@ -460,8 +460,16 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
                 .get("author_sig")
                 .and_then(|x| x.as_str())
                 .map(|s| s.to_string());
-            // H4: require author signature unless PLATARIUM_DAG_ALLOW_UNSIGNED=1.
+            // H4 / issue #51: require author signature unless unsigned DAG is
+            // allowed. Multi-node always fail-closes via `dag_unsigned_allowed`.
             if !crate::core::rpc_security::dag_unsigned_allowed() {
+                // Prefer an explicit multi-node config error when sig material is absent.
+                if crate::core::runtime_gates::multi_node_enabled()
+                    && (vertex.author_sig.as_ref().map(|s| s.is_empty()).unwrap_or(true)
+                        || vertex.author_pub.as_ref().map(|s| s.is_empty()).unwrap_or(true))
+                {
+                    crate::core::runtime_gates::assert_unsigned_dag_allowed()?;
+                }
                 vertex
                     .verify_author_signature()
                     .map_err(PlatariumError::State)?;
