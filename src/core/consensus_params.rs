@@ -23,3 +23,11 @@ pub const FAUCET_ADDRESS: &str = "faucet";
 /// Allows parallel HTTP submits after Gateway `/api/nonce/allocate` without
 /// requiring in-order arrival. Packing still requires consecutive nonces.
 pub const MEMPOOL_MAX_NONCE_GAP: u64 = 64;
+
+/// Maximum allowed positive drift of a consensus timestamp ahead of the
+/// caller's local wall clock (seconds). Issue #72.
+///
+/// Consensus-critical paths reject when
+/// `timestamp > local_wall_clock + MAX_DRIFT`. This is **not** env-configurable.
+/// See [`crate::core::consensus_timestamp::validate_consensus_timestamp`].
+pub const MAX_DRIFT: i64 = 30;

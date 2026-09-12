@@ -55,6 +55,34 @@ pub fn block_cycle_json(params: &Value) -> Result<String> {
         .get("producer_id")
         .and_then(|v| v.as_str())
         .ok_or_else(|| PlatariumError::State("missing param producer_id".into()))?;
+    // Issues #71 / #72: consensus timestamp gates on the block_cycle path.
+    let previous_timestamp = params
+        .get("previous_timestamp")
+        .and_then(|v| v.as_i64())
+        .or_else(|| {
+            params
+                .get("previous_timestamp")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as i64)
+        })
+        .unwrap_or(0);
+    let local_time = params
+        .get("now_unix")
+        .or_else(|| params.get("local_time"))
+        .and_then(|v| v.as_i64())
+        .or_else(|| {
+            params
+                .get("now_unix")
+                .or_else(|| params.get("local_time"))
+                .and_then(|v| v.as_u64())
+                .map(|n| n as i64)
+        })
+        .unwrap_or(timestamp);
+    crate::core::consensus_timestamp::validate_consensus_timestamp(
+        timestamp,
+        previous_timestamp,
+        local_time,
+    )?;
     let auto_confirm = params
         .get("auto_confirm")
         .and_then(|v| v.as_bool())
@@ -338,5 +366,58 @@ mod tests {
         // L1 may fail signature verify with dummy sigs — still exercise packing path.
         assert!(v.get("selected").is_some());
         assert!(v.get("l1").is_some());
+    }
+
+    #[test]
+    fn block_cycle_rejects_non_monotonic_timestamp() {
+        let _g = GATE_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("PLATARIUM_CORE_MULTI_NODE");
+        let dir = TempDir::new().unwrap();
+        let state = dir.path().join("state.json");
+        init_state_file(&state).unwrap();
+        let params = json!({
+            "state_file": state.to_string_lossy(),
+            "mempool_txs": "[]",
+            "block_number": 2,
+            "previous_hash": "bh1",
+            "timestamp": 100,
+            "previous_timestamp": 100,
+            "now_unix": 100,
+            "producer_id": "node0",
+            "auto_confirm": false,
+            "apply_txs": false,
+        });
+        let err = block_cycle_json(&params).unwrap_err();
+        assert!(
+            err.to_string().contains("non-monotonic"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn block_cycle_rejects_excessive_timestamp_drift() {
+        let _g = GATE_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("PLATARIUM_CORE_MULTI_NODE");
+        let dir = TempDir::new().unwrap();
+        let state = dir.path().join("state.json");
+        init_state_file(&state).unwrap();
+        let local = 1_000i64;
+        let params = json!({
+            "state_file": state.to_string_lossy(),
+            "mempool_txs": "[]",
+            "block_number": 1,
+            "previous_hash": "0",
+            "timestamp": local + crate::core::consensus_params::MAX_DRIFT + 1,
+            "previous_timestamp": 0,
+            "now_unix": local,
+            "producer_id": "node0",
+            "auto_confirm": false,
+            "apply_txs": false,
+        });
+        let err = block_cycle_json(&params).unwrap_err();
+        assert!(
+            err.to_string().contains("MAX_DRIFT"),
+            "{err}"
+        );
     }
 }

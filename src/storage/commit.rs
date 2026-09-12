@@ -156,6 +156,19 @@ pub fn commit_block(store: &RocksStore, commit: &BlockCommit) -> Result<()> {
 
     let height = commit.block.height;
     let current_head = store.head_height()?;
+    // Issues #71: consensus timestamps must be strictly monotonic vs previous tip.
+    let previous_timestamp = if height <= 1 {
+        0i64
+    } else {
+        match crate::storage::query::get_block(store, height - 1)? {
+            Some(prev) => prev.timestamp,
+            None => 0,
+        }
+    };
+    crate::core::consensus_timestamp::validate_timestamp_monotonic(
+        commit.block.timestamp,
+        previous_timestamp,
+    )?;
     // Issue #46: duplicate finalize of the same tip is idempotent; conflicting overwrite rejected.
     if height == current_head && current_head > 0 {
         if let Some(existing) = crate::storage::query::get_block(store, height)? {
@@ -315,6 +328,36 @@ mod tests {
             }],
             state_root: "root1".into(),
         }
+    }
+
+    /// Issue #46: duplicate finalize of the same tip is idempotent; conflicting overwrite rejected.
+    /// Issue #71: non-monotonic timestamp vs previous tip is rejected.
+    #[test]
+    fn commit_rejects_non_monotonic_timestamp() {
+        let dir = TempDir::new().unwrap();
+        let store = RocksStore::open(dir.path().join("db")).unwrap();
+        let mut c1 = sample_commit(1);
+        c1.block.timestamp = 10;
+        commit_block(&store, &c1).unwrap();
+
+        let mut c2 = sample_commit(2);
+        c2.block.timestamp = 10; // equal to previous → reject
+        c2.block.state_root = "root2".into();
+        c2.state_root = "root2".into();
+        c2.block.block_hash = "bh2".into();
+        c2.block.previous_hash = "bh1".into();
+        c2.block.tx_hashes = vec!["ccdd".into()];
+        c2.tx_jsons = vec![
+            r#"{"hash":"ccdd","from":"PxA","to":"PxB","asset":"PLP","amount":1,"fee_uplp":1,"nonce":1,"reads":[],"writes":[],"sig_main":"aa","sig_derived":"bb"}"#.into(),
+        ];
+        c2.receipts[0].tx_hash = "ccdd".into();
+        c2.receipts[0].block_height = 2;
+        let err = commit_block(&store, &c2).unwrap_err();
+        assert!(
+            err.to_string().contains("non-monotonic"),
+            "{err}"
+        );
+        assert_eq!(get_head(&store).unwrap(), 1);
     }
 
     #[test]

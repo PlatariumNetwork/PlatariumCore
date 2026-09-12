@@ -1,7 +1,7 @@
-//! Ledger consistency diagnostics (issues #61–#63).
+//! Ledger consistency diagnostics (issues #61–#65).
 //!
-//! Read-only checks — never mutates ledgers. Compares execution tip / accounts
-//! against Rocks canonical tip when an execution view is supplied.
+//! Read-only checks — never mutates ledgers (no auto-repair). Compares execution
+//! tip / accounts against Rocks canonical tip when an execution view is supplied.
 
 use crate::core::asset::Asset;
 use crate::core::crash_failpoints::{assert_height_hash_invariant, read_canonical_tip};
@@ -230,6 +230,16 @@ pub fn check_execution_vs_rocks(
         rocks_head,
         state_root,
     ))
+}
+
+/// Machine-readable JSON for a [`ConsistencyVerdict`] (issues #64 / #65 fixtures).
+///
+/// Consistent shape: `{status, height, rocks_head, state_root?}`.
+/// Diverged shape: adds `reason`. Never mutates ledgers.
+pub fn consistency_verdict_json(verdict: &ConsistencyVerdict) -> Result<String> {
+    serde_json::to_string(verdict).map_err(|e| {
+        PlatariumError::State(format!("encode consistency verdict: {e}"))
+    })
 }
 
 fn resolve_addresses(
@@ -466,5 +476,96 @@ mod tests {
         assert!(reason.contains("address=PxA"), "{reason}");
         assert!(reason.contains("field=xp") || reason.contains("field=tokens"), "{reason}");
         evict_cached(&db_path);
+    }
+
+    /// Issue #64: matching fixture → machine-readable consistent JSON shape.
+    #[test]
+    fn consistent_result_json_fixture() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("rocks");
+        let store = RocksStore::open(&db_path).unwrap();
+        commit_block(&store, &sample_commit(1, "root1", "bh1")).unwrap();
+
+        let state = State::new();
+        state.set_balance(&"PxA".into(), 90);
+        state.set_nonce(&"PxA".into(), 1);
+        state.set_asset_balance(&"PxA".into(), &Asset::xp(), 40);
+
+        let exec = ExecutionTipView {
+            height: 1,
+            block_hash: "bh1".into(),
+        };
+        let verdict =
+            check_execution_vs_rocks(&state, &exec, &store, Some(&["PxA".into()])).unwrap();
+        assert_eq!(verdict.status, STATUS_CONSISTENT);
+        assert!(verdict.is_consistent());
+
+        let raw = consistency_verdict_json(&verdict).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["status"], "consistent");
+        assert_eq!(v["height"], 1);
+        assert_eq!(v["rocks_head"], 1);
+        assert_eq!(v["state_root"], "root1");
+        assert!(v.get("reason").is_none() || v["reason"].is_null());
+        evict_cached(&db_path);
+    }
+
+    /// Issue #65: forced mismatch → diverged + reason; no auto-repair (state unchanged).
+    #[test]
+    fn diverged_result_json_fixture_no_repair() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("rocks");
+        let store = RocksStore::open(&db_path).unwrap();
+        commit_block(&store, &sample_commit(1, "root1", "bh1")).unwrap();
+
+        let state = State::new();
+        state.set_balance(&"PxA".into(), 90);
+        state.set_nonce(&"PxA".into(), 1);
+        state.set_asset_balance(&"PxA".into(), &Asset::xp(), 40);
+
+        let tip_before = read_canonical_tip_accounts(&store);
+        let bal_before = state.get_balance(&"PxA".into());
+        let xp_before = state.get_asset_balance(&"PxA".into(), &Asset::xp());
+        let nonce_before = state.get_nonce(&"PxA".into());
+
+        // Forced height mismatch.
+        let exec = ExecutionTipView {
+            height: 9,
+            block_hash: "bh1".into(),
+        };
+        let verdict =
+            check_execution_vs_rocks(&state, &exec, &store, Some(&["PxA".into()])).unwrap();
+        assert_eq!(verdict.status, STATUS_DIVERGED);
+        assert!(!verdict.is_consistent());
+        assert!(verdict.reason.is_some());
+
+        let raw = consistency_verdict_json(&verdict).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["status"], "diverged");
+        assert!(v["reason"].as_str().unwrap().contains(REASON_HEIGHT_MISMATCH));
+
+        // No auto-repair: Rocks tip and execution state unchanged after call.
+        let tip_after = read_canonical_tip_accounts(&store);
+        assert_eq!(tip_before, tip_after, "rocks must be unchanged (no repair)");
+        assert_eq!(state.get_balance(&"PxA".into()), bal_before);
+        assert_eq!(state.get_asset_balance(&"PxA".into(), &Asset::xp()), xp_before);
+        assert_eq!(state.get_nonce(&"PxA".into()), nonce_before);
+        evict_cached(&db_path);
+    }
+
+    fn read_canonical_tip_accounts(
+        store: &RocksStore,
+    ) -> (u64, Option<String>, Vec<(String, String, u64, String)>) {
+        use crate::storage::query::{get_block, get_head, list_accounts};
+        let head = get_head(store).unwrap();
+        let hash = get_block(store, head)
+            .unwrap()
+            .map(|b| b.block_hash);
+        let accounts: Vec<_> = list_accounts(store)
+            .unwrap()
+            .into_iter()
+            .map(|a| (a.address, a.balance, a.nonce, a.xp))
+            .collect();
+        (head, hash, accounts)
     }
 }

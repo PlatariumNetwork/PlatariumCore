@@ -175,7 +175,10 @@ pub use core::block_proposal::{
 };
 pub use core::consensus_params::{
     BLOCK_GAS_CAP_UPLP, BLOCK_MAX_TX_COUNT, BLOCK_MAX_WAIT_SEC, BLOCK_MIN_GAS_UPLP,
-    BLOCK_MIN_TX_COUNT, FAUCET_ADDRESS,
+    BLOCK_MIN_TX_COUNT, FAUCET_ADDRESS, MAX_DRIFT,
+};
+pub use core::consensus_timestamp::{
+    validate_consensus_timestamp, validate_timestamp_drift, validate_timestamp_monotonic,
 };
 pub use core::kernel::{
     build_ordered_batch, clone_state, commit_state_diff, compute_waves, diagnose_state_diff_mismatch,
@@ -190,14 +193,17 @@ pub use core::dag::{
 };
 pub use core::consistency::{
     check_consistency, check_consistency_json, check_consistency_store, check_execution_vs_rocks,
-    compare_height_hash, ConsistencyReport, ConsistencyVerdict, ExecutionTipView,
-    REASON_ACCOUNT_STATE_MISMATCH, REASON_HASH_MISMATCH, REASON_HEIGHT_MISMATCH, STATUS_CONSISTENT,
-    STATUS_DIVERGED,
+    compare_height_hash, consistency_verdict_json, ConsistencyReport, ConsistencyVerdict,
+    ExecutionTipView, REASON_ACCOUNT_STATE_MISMATCH, REASON_HASH_MISMATCH, REASON_HEIGHT_MISMATCH,
+    STATUS_CONSISTENT, STATUS_DIVERGED,
 };
 pub use core::crash_failpoints::{
     assert_height_hash_invariant, persist_staging_then_rocks, read_canonical_tip, TipPair,
 };
-pub use core::replay::{replay_blocks_from_state0, ReplayTip};
+pub use core::replay::{
+    accounts_from_state, compare_replay_tip_to_persisted, persist_tip_from_state,
+    replay_blocks_from_state0, ReplayTip,
+};
 pub use core::protocol_notes::{NOW_UNIX_IS_WALL_CLOCK, THREE_CLOCK_SPLIT_DOC};
 pub use core::failpoints::{
     arm as failpoint_arm, clear as failpoint_clear, clear_all as failpoint_clear_all, hit as failpoint_hit,

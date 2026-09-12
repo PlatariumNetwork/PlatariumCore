@@ -9,7 +9,7 @@
 //! |-------|---------|----------|
 //! | **Consensus timestamp** | Block / tip timestamp agreed by consensus rules (monotonic vs previous tip; subject to drift gates). | Block validity, chain ordering |
 //! | **Execution timestamp** | Logical time carried on txs / escrow fields when the protocol requires it; deterministic input to execution — never `SystemTime`. | Escrow expiry fields, tx-embedded times |
-//! | **Local wall clock** | Operator / process wall time (`now_unix` from CLI/RPC caller, or host clock). | Mempool wait heuristics, `MAX_DRIFT` checks against consensus timestamps |
+//! | **Local wall clock** | Operator / process wall time (`now_unix` from CLI/RPC caller, or host clock). | Mempool wait heuristics, [`MAX_DRIFT`](crate::core::consensus_params::MAX_DRIFT) checks against consensus timestamps |
 //!
 //! ## `now_unix` contract
 //!
@@ -17,8 +17,9 @@
 //! **operator-supplied local wall clock** for mempool age / propose heuristics.
 //! It is **not** a consensus timestamp and must not be written into blocks as
 //! unchecked consensus time. Consensus timestamps are validated on consensus-
-//! critical paths (monotonicity + drift), not by treating caller `now_unix` as
-//! authoritative chain time.
+//! critical paths (monotonicity + [`MAX_DRIFT`](crate::core::consensus_params::MAX_DRIFT)),
+//! not by treating caller `now_unix` as authoritative chain time.
+//! See [`crate::core::consensus_timestamp::validate_consensus_timestamp`].
 
 /// Stable label for the three-clock split (discoverable in rustdoc / tests).
 pub const THREE_CLOCK_SPLIT_DOC: &str =
