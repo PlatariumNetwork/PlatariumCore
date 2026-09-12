@@ -1,7 +1,7 @@
 //! Core protocol invariants I1–I10 (issue #78).
 //!
 //! Short freeze of consensus/execution safety rules. Executable coverage for
-//! I1–I4 lands in this module; remaining paths are placeholders until linked.
+//! I1–I4 lands in this module; I5–I10 integration tests live under `tests/`.
 //!
 //! | Id | Statement | Test path |
 //! |----|-----------|-----------|
@@ -9,15 +9,21 @@
 //! | **I2** | An invalid signature is never executable. | `src/core/protocol_invariants.rs#i2_invalid_signature_never_executable` |
 //! | **I3** | Nonce cannot decrease. | `src/core/protocol_invariants.rs#i3_nonce_cannot_decrease` |
 //! | **I4** | Balance cannot become negative. | `src/core/protocol_invariants.rs#i4_balance_cannot_become_negative` |
-//! | **I5** | Tokens/XP cannot disappear on persistence. | `tests/…#i5_tokens_xp_persist` |
-//! | **I6** | A finalized block cannot be applied twice. | `tests/…#i6_finalized_block_not_applied_twice` |
-//! | **I7** | A conflicting block cannot overwrite the canonical tip. | `tests/…#i7_conflict_cannot_overwrite_canonical` |
-//! | **I8** | A failed commit cannot expose partial state. | `tests/…#i8_failed_commit_no_partial_state` |
-//! | **I9** | Restart preserves canonical state. | `tests/…#i9_restart_preserves_canonical` |
-//! | **I10** | A Core error cannot imply consensus acceptance. | `tests/…#i10_core_error_not_consensus_accept` |
+//! | **I5** | Tokens/XP cannot disappear on persistence. | `tests/protocol_invariants_i5_i10_test.rs#i5_tokens_xp_persist` |
+//! | **I6** | A finalized block cannot be applied twice. | `tests/protocol_invariants_i5_i10_test.rs#i6_finalized_block_not_applied_twice` |
+//! | **I7** | A conflicting block cannot overwrite the canonical tip. | `tests/protocol_invariants_i5_i10_test.rs#i7_conflict_cannot_overwrite_canonical` |
+//! | **I8** | A failed commit cannot expose partial state. | `tests/protocol_invariants_i5_i10_test.rs#i8_failed_commit_no_partial_state` |
+//! | **I9** | Restart preserves canonical state. | `tests/protocol_invariants_i5_i10_test.rs#i9_restart_preserves_canonical` |
+//! | **I10** | A Core error cannot imply consensus acceptance. | `tests/protocol_invariants_i5_i10_test.rs#i10_core_error_not_consensus_accept` |
 //!
 //! See also [`crate::core::protocol_notes`] (clocks) and
 //! [`crate::core::determinism`] (determinism audit).
+//!
+//! ## Gateway consumers (I10)
+//!
+//! See [`GATEWAY_CORE_ERROR_NOT_ACCEPT_DOC`]: a Core error, uncertain result, or
+//! non-COMMITTED finalize (`ok=false` / `persisted=false` / JSON-RPC error)
+//! must **not** be mapped to consensus accept or block finalized.
 
 /// Stable one-line catalog of I1–I10 for discovery / tests (issue #78).
 pub const PROTOCOL_INVARIANTS_DOC: &str = concat!(
@@ -33,18 +39,28 @@ pub const PROTOCOL_INVARIANTS_DOC: &str = concat!(
     "I10: Core error cannot imply consensus acceptance"
 );
 
-/// Test-path anchors for I1–I10 (I1–I4 linked; I5–I10 placeholders until filled).
+/// Gateway contract for I10 (issue #88): Core failure ≠ consensus acceptance.
+///
+/// Gateway must treat any of the following as **not accepted / not finalized**:
+/// JSON-RPC `error`, finalize `ok=false`, `persisted=false`, `phase != committed`,
+/// or an uncertain/missing tip — never as L1/L2 confirm or block finality.
+pub const GATEWAY_CORE_ERROR_NOT_ACCEPT_DOC: &str = concat!(
+    "I10 Gateway: Core error/uncertain/ok=false/persisted=false/phase!=committed/JSON-RPC error ",
+    "must not be mapped to consensus accept or block finalized"
+);
+
+/// Test-path anchors for I1–I10 (all linked to executable tests).
 pub const PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS: &[&str] = &[
     "src/core/protocol_invariants.rs#i1_same_block_state_diff",
     "src/core/protocol_invariants.rs#i2_invalid_signature_never_executable",
     "src/core/protocol_invariants.rs#i3_nonce_cannot_decrease",
     "src/core/protocol_invariants.rs#i4_balance_cannot_become_negative",
-    "tests/…#i5_tokens_xp_persist",
-    "tests/…#i6_finalized_block_not_applied_twice",
-    "tests/…#i7_conflict_cannot_overwrite_canonical",
-    "tests/…#i8_failed_commit_no_partial_state",
-    "tests/…#i9_restart_preserves_canonical",
-    "tests/…#i10_core_error_not_consensus_accept",
+    "tests/protocol_invariants_i5_i10_test.rs#i5_tokens_xp_persist",
+    "tests/protocol_invariants_i5_i10_test.rs#i6_finalized_block_not_applied_twice",
+    "tests/protocol_invariants_i5_i10_test.rs#i7_conflict_cannot_overwrite_canonical",
+    "tests/protocol_invariants_i5_i10_test.rs#i8_failed_commit_no_partial_state",
+    "tests/protocol_invariants_i5_i10_test.rs#i9_restart_preserves_canonical",
+    "tests/protocol_invariants_i5_i10_test.rs#i10_core_error_not_consensus_accept",
 ];
 
 #[cfg(test)]
@@ -148,6 +164,14 @@ mod tests {
                 idx + 1
             );
         }
+        assert!(
+            GATEWAY_CORE_ERROR_NOT_ACCEPT_DOC.contains("must not be mapped to consensus accept"),
+            "I10 Gateway consumer doc missing"
+        );
+        assert!(PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS[4]
+            .contains("protocol_invariants_i5_i10_test.rs#i5_"));
+        assert!(PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS[9]
+            .contains("protocol_invariants_i5_i10_test.rs#i10_"));
     }
 
     /// Issue #79 / I1: same block + state → identical StateDiff (fails if diverges).
