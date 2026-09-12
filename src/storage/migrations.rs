@@ -218,4 +218,121 @@ mod tests {
         assert!(MIGRATION_EXTENSION_DOC.contains("serde defaults"));
         assert!(MIGRATION_EXTENSION_DOC.contains("old-schema fixture"));
     }
+
+    /// Issue #76: after migration, read → write → read preserves tokens/xp and
+    /// prior balance/nonce (round-trip green).
+    #[test]
+    fn post_migration_read_write_read_preserves_tokens_xp() {
+        use crate::core::asset::Asset;
+        use crate::core::kernel::commit_engine::commit_state_diff;
+        use crate::core::kernel::state_diff::{AccountPostImage, StateDiff, STATE_DIFF_SCHEMA_VERSION};
+        use crate::storage::cache::evict_cached;
+        use crate::storage::engine::RocksAccountStorageEngine;
+        use std::collections::BTreeMap;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("post_mig_rwr_db");
+
+        // v1 fixture with tokens/xp already present (serde-forward) + balance/nonce.
+        let mut tokens = BTreeMap::new();
+        tokens.insert("Token:USDT".to_string(), "77".to_string());
+        tokens.insert(Asset::xp().as_canonical(), "250".to_string());
+        let seeded = AccountRecord {
+            address: "PxRwr".into(),
+            balance: "5000".into(),
+            uplp_balance: "12".into(),
+            nonce: 7,
+            tokens: tokens.clone(),
+            xp: "250".into(),
+        };
+        {
+            let mut opts = Options::default();
+            opts.create_if_missing(true);
+            let db = DB::open(&opts, &path).unwrap();
+            write_schema_version(&db, 1).unwrap();
+            db.put(
+                key_account("PxRwr"),
+                serde_json::to_vec(&seeded).expect("serialize seeded account"),
+            )
+            .unwrap();
+            assert_eq!(read_schema_version(&db).unwrap(), Some(1));
+        }
+
+        // Migrate on open, then READ — capture prior balance/nonce + tokens/xp.
+        let (prior_balance, prior_uplp, prior_nonce, prior_tokens, prior_xp) = {
+            let store = RocksStore::open(&path).expect("migrate on open");
+            assert_eq!(
+                read_schema_version(store.db()).unwrap(),
+                Some(SCHEMA_VERSION)
+            );
+            let got = get_account(&store, "PxRwr")
+                .expect("read")
+                .expect("account present after migration");
+            assert_eq!(got.balance, "5000");
+            assert_eq!(got.uplp_balance, "12");
+            assert_eq!(got.nonce, 7);
+            assert_eq!(got.xp, "250");
+            assert_eq!(
+                got.tokens.get("Token:USDT").map(String::as_str),
+                Some("77")
+            );
+            (
+                got.balance.clone(),
+                got.uplp_balance.clone(),
+                got.nonce,
+                got.tokens.clone(),
+                got.xp.clone(),
+            )
+        };
+        evict_cached(&path);
+
+        // WRITE: balance-only post-image (empty token_balances) must RMW-preserve
+        // durable tokens/xp while updating balance/nonce.
+        {
+            let mut eng = RocksAccountStorageEngine::open(&path).unwrap();
+            let bal_only = StateDiff {
+                schema_version: STATE_DIFF_SCHEMA_VERSION,
+                batch_id: "post-mig-rwr".into(),
+                receipts: vec![],
+                accounts: vec![AccountPostImage {
+                    address: "PxRwr".into(),
+                    plp_balance: "4900".into(),
+                    uplp_balance: "11".into(),
+                    nonce: 8,
+                    token_balances: BTreeMap::new(),
+                }],
+                pre_state_root: None,
+                post_state_root: "rwr-root".into(),
+                escrows_json: None,
+            };
+            let res = commit_state_diff(&mut eng, &bal_only).unwrap();
+            assert!(res.ok, "{:?}", res.error);
+        }
+        evict_cached(&path);
+
+        // READ again — tokens/xp intact; prior values were correct before write.
+        let store = RocksStore::open(&path).unwrap();
+        let got = get_account(&store, "PxRwr")
+            .expect("second read")
+            .expect("account still present");
+        assert_eq!(prior_balance, "5000");
+        assert_eq!(prior_uplp, "12");
+        assert_eq!(prior_nonce, 7);
+        assert_eq!(prior_xp, "250");
+        assert_eq!(prior_tokens.get("Token:USDT").map(String::as_str), Some("77"));
+        assert_eq!(got.balance, "4900");
+        assert_eq!(got.uplp_balance, "11");
+        assert_eq!(got.nonce, 8);
+        assert_eq!(got.xp, "250", "xp must survive post-migration RWR");
+        assert_eq!(
+            got.tokens.get("Token:USDT").map(String::as_str),
+            Some("77"),
+            "tokens must survive post-migration RWR"
+        );
+        assert_eq!(
+            got.tokens.get(&Asset::xp().as_canonical()).map(String::as_str),
+            Some("250")
+        );
+        evict_cached(&path);
+    }
 }
