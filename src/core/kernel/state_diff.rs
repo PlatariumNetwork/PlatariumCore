@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 pub const STATE_DIFF_SCHEMA_VERSION: u32 = 1;
 
@@ -72,6 +73,117 @@ impl StateDiff {
     }
 }
 
+/// Actionable diagnostics when two StateDiffs disagree (issue #69).
+///
+/// Returns `Ok(())` when equal. On mismatch, `Err` message includes the
+/// diverged address and field (not only an opaque bool).
+pub fn diagnose_state_diff_mismatch(expected: &StateDiff, actual: &StateDiff) -> Result<(), String> {
+    if expected == actual {
+        return Ok(());
+    }
+    let mut msg = String::from("StateDiff mismatch:");
+    if expected.schema_version != actual.schema_version {
+        let _ = write!(
+            msg,
+            " field=schema_version expected={} actual={}",
+            expected.schema_version, actual.schema_version
+        );
+        return Err(msg);
+    }
+    if expected.batch_id != actual.batch_id {
+        let _ = write!(
+            msg,
+            " field=batch_id expected={} actual={}",
+            expected.batch_id, actual.batch_id
+        );
+        return Err(msg);
+    }
+    if expected.post_state_root != actual.post_state_root {
+        let _ = write!(
+            msg,
+            " field=post_state_root expected={} actual={}",
+            expected.post_state_root, actual.post_state_root
+        );
+        return Err(msg);
+    }
+    if expected.pre_state_root != actual.pre_state_root {
+        let _ = write!(
+            msg,
+            " field=pre_state_root expected={:?} actual={:?}",
+            expected.pre_state_root, actual.pre_state_root
+        );
+        return Err(msg);
+    }
+    if expected.receipts != actual.receipts {
+        let _ = write!(msg, " field=receipts (count expected={} actual={})", expected.receipts.len(), actual.receipts.len());
+        return Err(msg);
+    }
+    if expected.escrows_json != actual.escrows_json {
+        let _ = write!(msg, " field=escrows_json");
+        return Err(msg);
+    }
+
+    let mut exp_map: BTreeMap<&str, &AccountPostImage> = BTreeMap::new();
+    for a in &expected.accounts {
+        exp_map.insert(a.address.as_str(), a);
+    }
+    let mut act_map: BTreeMap<&str, &AccountPostImage> = BTreeMap::new();
+    for a in &actual.accounts {
+        act_map.insert(a.address.as_str(), a);
+    }
+
+    let mut addrs: BTreeMap<&str, ()> = BTreeMap::new();
+    for k in exp_map.keys().chain(act_map.keys()) {
+        addrs.insert(k, ());
+    }
+    for addr in addrs.keys() {
+        match (exp_map.get(addr), act_map.get(addr)) {
+            (None, Some(_)) => {
+                return Err(format!(
+                    "StateDiff mismatch: address={addr} field=presence expected=missing actual=present"
+                ));
+            }
+            (Some(_), None) => {
+                return Err(format!(
+                    "StateDiff mismatch: address={addr} field=presence expected=present actual=missing"
+                ));
+            }
+            (Some(e), Some(a)) => {
+                if e.plp_balance != a.plp_balance {
+                    return Err(format!(
+                        "StateDiff mismatch: address={addr} field=plp_balance expected={} actual={}",
+                        e.plp_balance, a.plp_balance
+                    ));
+                }
+                if e.uplp_balance != a.uplp_balance {
+                    return Err(format!(
+                        "StateDiff mismatch: address={addr} field=uplp_balance expected={} actual={}",
+                        e.uplp_balance, a.uplp_balance
+                    ));
+                }
+                if e.nonce != a.nonce {
+                    return Err(format!(
+                        "StateDiff mismatch: address={addr} field=nonce expected={} actual={}",
+                        e.nonce, a.nonce
+                    ));
+                }
+                if e.token_balances != a.token_balances {
+                    return Err(format!(
+                        "StateDiff mismatch: address={addr} field=token_balances expected={:?} actual={:?}",
+                        e.token_balances, a.token_balances
+                    ));
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    Err(format!(
+        "StateDiff mismatch: address=<unknown> field=<opaque> fingerprints expected={} actual={}",
+        expected.content_fingerprint(),
+        actual.content_fingerprint()
+    ))
+}
+
 /// Pretty-stable Value for golden comparisons (sort account arrays).
 pub fn normalize_diff_value(mut v: Value) -> Value {
     if let Some(obj) = v.as_object_mut() {
@@ -130,5 +242,36 @@ mod tests {
         assert!(j1.find("\"address\":\"a\"").unwrap() < j1.find("\"address\":\"b\"").unwrap());
         let round = StateDiff::from_canonical_json(&j1).unwrap();
         assert_eq!(diff.content_fingerprint(), round.content_fingerprint());
+    }
+
+    /// Issue #69: mismatch diagnostics include address and field.
+    #[test]
+    fn diagnose_reports_address_and_field() {
+        let mut a = StateDiff {
+            schema_version: STATE_DIFF_SCHEMA_VERSION,
+            batch_id: "b1".into(),
+            receipts: vec![],
+            accounts: vec![AccountPostImage {
+                address: "PxAlice".into(),
+                plp_balance: "100".into(),
+                uplp_balance: "0".into(),
+                nonce: 1,
+                token_balances: BTreeMap::new(),
+            }],
+            pre_state_root: None,
+            post_state_root: "post".into(),
+            escrows_json: None,
+        };
+        let mut b = a.clone();
+        b.accounts[0].nonce = 2;
+        let err = diagnose_state_diff_mismatch(&a, &b).unwrap_err();
+        assert!(err.contains("address=PxAlice"), "{err}");
+        assert!(err.contains("field=nonce"), "{err}");
+        assert!(diagnose_state_diff_mismatch(&a, &a).is_ok());
+
+        a.accounts[0].plp_balance = "50".into();
+        let err2 = diagnose_state_diff_mismatch(&a, &b).unwrap_err();
+        assert!(err2.contains("address=PxAlice"), "{err2}");
+        assert!(err2.contains("field=plp_balance"), "{err2}");
     }
 }

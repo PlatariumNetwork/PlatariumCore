@@ -24,11 +24,14 @@ pub use commit::{
     assert_commit_allowed_after_execution, build_commit_batch, commit_block,
 };
 pub use query::{
-    get_account, get_block, get_head, get_receipt, get_state_root, get_tx,
+    get_account, get_block, get_head, get_receipt, get_state_root, get_tx, list_accounts,
     list_tx_hashes_for_address,
 };
 pub use rocks::{RocksStore, open_store};
 pub use schema::SCHEMA_VERSION;
+pub use migrations::{
+    ensure_schema, migrate, read_schema_version, write_schema_version,
+};
 pub use snapshot::{
     SNAPSHOT_INTERVAL, SnapshotMeta, bootstrap_from_snapshot, create_snapshot_if_due, list_snapshots,
 };

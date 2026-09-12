@@ -178,9 +178,9 @@ pub use core::consensus_params::{
     BLOCK_MIN_TX_COUNT, FAUCET_ADDRESS,
 };
 pub use core::kernel::{
-    build_ordered_batch, clone_state, commit_state_diff, compute_waves, execute_ordered_batch,
-    AccountPostImage, CommitResult, ExecuteOptions, ExecuteOutcome, ExecutionWave, OrderedBatch,
-    StateDiff, TxReceipt, STATE_DIFF_SCHEMA_VERSION,
+    build_ordered_batch, clone_state, commit_state_diff, compute_waves, diagnose_state_diff_mismatch,
+    execute_ordered_batch, AccountPostImage, CommitResult, ExecuteOptions, ExecuteOutcome,
+    ExecutionWave, OrderedBatch, StateDiff, TxReceipt, STATE_DIFF_SCHEMA_VERSION,
 };
 pub use core::dag::{
     clear_last_commit, dag_to_ordered_batch, get_last_commit, ingest, leader_for_round, linearize,
@@ -189,11 +189,16 @@ pub use core::dag::{
     IngestStatus, LinearizeResult, OrderDigestsResult, PendingQueue, VertexId, SHARED_GENESIS_AUTHOR,
 };
 pub use core::consistency::{
-    check_consistency, check_consistency_json, check_consistency_store, ConsistencyReport,
+    check_consistency, check_consistency_json, check_consistency_store, check_execution_vs_rocks,
+    compare_height_hash, ConsistencyReport, ConsistencyVerdict, ExecutionTipView,
+    REASON_ACCOUNT_STATE_MISMATCH, REASON_HASH_MISMATCH, REASON_HEIGHT_MISMATCH, STATUS_CONSISTENT,
+    STATUS_DIVERGED,
 };
 pub use core::crash_failpoints::{
     assert_height_hash_invariant, persist_staging_then_rocks, read_canonical_tip, TipPair,
 };
+pub use core::replay::{replay_blocks_from_state0, ReplayTip};
+pub use core::protocol_notes::{NOW_UNIX_IS_WALL_CLOCK, THREE_CLOCK_SPLIT_DOC};
 pub use core::failpoints::{
     arm as failpoint_arm, clear as failpoint_clear, clear_all as failpoint_clear_all, hit as failpoint_hit,
     is_armed as failpoint_is_armed, FP_AFTER_ROCKS_WRITE, FP_AFTER_STATE_WRITE, FP_BEFORE_COMMIT,
@@ -208,11 +213,12 @@ pub use core::finalize_contract::{
 pub use storage::{
     AccountRecord, BlockCommit, BlockRecordStored, ReceiptRecord, RocksStore, SNAPSHOT_INTERVAL,
     SnapshotMeta, SCHEMA_VERSION, account_record_to_query_json, account_rmw_preserve_tokens_xp,
-    bootstrap_from_snapshot, build_commit_batch, commit_block, create_snapshot_if_due, get_account,
-    get_block, get_head, get_receipt, get_state_root, get_tx, list_snapshots,
-    list_tx_hashes_for_address, migrate_json_to_rocks, open_store, rocks_bootstrap_snapshot_json,
-    rocks_commit_block_json, rocks_get_account_json, rocks_get_block_json, rocks_get_head_json,
-    rocks_get_receipt_json, rocks_get_snapshot_json, rocks_get_state_root_json, rocks_get_tx_json,
-    rocks_list_address_txs_json, rocks_list_snapshots_json, InMemoryStorageEngine,
-    RocksAccountStorageEngine, StateFileStorageEngine, StorageEngine,
+    bootstrap_from_snapshot, build_commit_batch, commit_block, create_snapshot_if_due, ensure_schema,
+    get_account, get_block, get_head, get_receipt, get_state_root, get_tx, list_accounts,
+    list_snapshots, list_tx_hashes_for_address, migrate, migrate_json_to_rocks, open_store,
+    read_schema_version, rocks_bootstrap_snapshot_json, rocks_commit_block_json,
+    rocks_get_account_json, rocks_get_block_json, rocks_get_head_json, rocks_get_receipt_json,
+    rocks_get_snapshot_json, rocks_get_state_root_json, rocks_get_tx_json,
+    rocks_list_address_txs_json, rocks_list_snapshots_json, write_schema_version,
+    InMemoryStorageEngine, RocksAccountStorageEngine, StateFileStorageEngine, StorageEngine,
 };

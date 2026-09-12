@@ -12,7 +12,10 @@ pub mod commit_engine;
 pub mod ordering;
 
 pub use ordered_batch::OrderedBatch;
-pub use state_diff::{AccountPostImage, StateDiff, TxReceipt, STATE_DIFF_SCHEMA_VERSION};
+pub use state_diff::{
+    diagnose_state_diff_mismatch, normalize_diff_value, AccountPostImage, StateDiff, TxReceipt,
+    STATE_DIFF_SCHEMA_VERSION,
+};
 pub use touch::{conflict_touch_set, touch_set};
 pub use scheduler::{compute_waves, ExecutionWave};
 pub use execute::{clone_state, execute_ordered_batch, ExecuteOptions, ExecuteOutcome};

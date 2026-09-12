@@ -10,6 +10,10 @@
 //! Contract for `after_rocks_write`: commit marker is **not** separate from the Rocks
 //! payload (single atomic batch). Tripping after a successful `commit_block` means the
 //! process dies post-durability → restart expects the **NEW** tip (never mixed height/hash).
+//!
+//! Shared helper [`assert_height_hash_invariant`] (issue #60) asserts
+//! `canonical_height == state_height` and hash pairing (`canonical_hash` / `state_hash`)
+//! with clear messages; used by failpoint restart tests (TASK-049…053).
 
 use crate::core::failpoints::{
     self, FP_AFTER_ROCKS_WRITE, FP_AFTER_STATE_WRITE, FP_BEFORE_COMMIT, FP_BEFORE_ROCKS_WRITE,
@@ -65,10 +69,13 @@ pub fn read_canonical_tip(store: &RocksStore) -> Result<TipPair> {
     })
 }
 
-/// Assert `canonical_height == state_height` and hash pairing at the Rocks tip.
+/// Assert `canonical_height == state_height` and `canonical_hash` / `state_hash` pairing
+/// at the Rocks tip (issue #60 — shared helper for failpoint tests TASK-049…053).
 ///
 /// - `canonical_height` / `canonical_hash`: `meta/head` and `block.block_hash`
 /// - `state_height` / `state_hash`: `block.height` and durable `state_root` meta
+///
+/// Mismatch panics with a clear assertion message naming both sides.
 pub fn assert_height_hash_invariant(store: &RocksStore) -> Result<TipPair> {
     let tip = read_canonical_tip(store)?;
     if tip.height == 0 {
@@ -88,23 +95,25 @@ pub fn assert_height_hash_invariant(store: &RocksStore) -> Result<TipPair> {
     );
     let meta_root = get_state_root(store, tip.height)?.ok_or_else(|| {
         crate::error::PlatariumError::State(format!(
-            "height/hash invariant: missing state_root at height {}",
+            "height/hash invariant: missing state_root (state_hash) at height {}",
             tip.height
         ))
     })?;
+    let canonical_hash = tip.block_hash.as_str();
+    let state_hash = meta_root.as_str();
     assert_eq!(
         block.state_root, meta_root,
-        "height/hash invariant: block.state_root={} != meta state_root={} at height {}",
+        "height/hash invariant: block.state_root={} != meta state_hash={} at height {}",
         block.state_root, meta_root, tip.height
     );
     assert_eq!(
         tip.block_hash, block.block_hash,
-        "height/hash invariant: tip.block_hash != block.block_hash at height {}",
-        tip.height
+        "height/hash invariant: canonical_hash={canonical_hash} != block.block_hash={} at height {}",
+        block.block_hash, tip.height
     );
     assert_eq!(
         tip.state_root, meta_root,
-        "height/hash invariant: tip.state_root != meta state_root at height {}",
+        "height/hash invariant: tip.state_hash != meta state_hash={state_hash} at height {}",
         tip.height
     );
     Ok(tip)

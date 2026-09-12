@@ -4,8 +4,8 @@ use crate::error::{PlatariumError, Result};
 use crate::storage::commit::{AccountRecord, BlockRecordStored, ReceiptRecord};
 use crate::storage::rocks::RocksStore;
 use crate::storage::schema::{
-    KEY_META_HEAD, PREFIX_IDX_ADDR, decode_u64, key_account, key_block, key_receipt, key_state_root,
-    key_tx,
+    KEY_META_HEAD, PREFIX_ACCOUNT, PREFIX_IDX_ADDR, decode_u64, key_account, key_block, key_receipt,
+    key_state_root, key_tx,
 };
 
 pub fn get_head(store: &RocksStore) -> Result<u64> {
@@ -38,6 +38,23 @@ pub fn get_account(store: &RocksStore, address: &str) -> Result<Option<AccountRe
         }
         None => Ok(None),
     }
+}
+
+/// List all account records (sorted by address). Used by consistency diagnostics.
+pub fn list_accounts(store: &RocksStore) -> Result<Vec<AccountRecord>> {
+    let mut accounts = Vec::new();
+    let iter = store.db().prefix_iterator(PREFIX_ACCOUNT);
+    for item in iter {
+        let (key, value) = item.map_err(|e| PlatariumError::State(format!("iter: {}", e)))?;
+        if !key.starts_with(PREFIX_ACCOUNT) {
+            break;
+        }
+        let acct: AccountRecord = serde_json::from_slice(&value)
+            .map_err(|e| PlatariumError::State(format!("decode account: {}", e)))?;
+        accounts.push(acct);
+    }
+    accounts.sort_by(|a, b| a.address.cmp(&b.address));
+    Ok(accounts)
 }
 
 pub fn get_receipt(store: &RocksStore, tx_hash: &str) -> Result<Option<ReceiptRecord>> {

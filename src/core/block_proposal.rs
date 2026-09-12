@@ -1,4 +1,9 @@
 //! Gas-triggered mempool admission and block tx selection (authoritative consensus rules).
+//!
+//! # Time
+//! [`block_proposal_status`]'s `now_unix` is **local wall clock** supplied by the caller
+//! (CLI/RPC). It is used only for mempool wait heuristics and must **not** be treated as
+//! unchecked consensus timestamp — see [`crate::core::protocol_notes`].
 
 use crate::core::asset::Asset;
 use crate::core::consensus_params::{
@@ -266,6 +271,9 @@ pub fn mempool_admit(
     }
 }
 
+/// Mempool propose heuristic using caller **local wall clock** `now_unix`.
+///
+/// `now_unix` is **not** consensus time (issue #70 / [`crate::core::protocol_notes`]).
 pub fn block_proposal_status(mempool: &[MempoolSnapshotEntry], now_unix: i64) -> BlockProposalStatus {
     let count = mempool.len();
     let gas = sum_fee_uplp(mempool);
