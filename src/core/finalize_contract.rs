@@ -577,6 +577,7 @@ mod tests {
         use crate::storage::engine::StateFileStorageEngine;
         use tempfile::TempDir;
 
+        let _guard = failpoints::test_lock();
         failpoints::clear_all();
         let (mn, alpha, alice) = wallet();
         let bob = "PxBobJsonFail00000000000000000000000000000000000000000000000001";
@@ -635,6 +636,7 @@ mod tests {
         use crate::storage::schema::key_account;
         use tempfile::TempDir;
 
+        let _guard = failpoints::test_lock();
         failpoints::clear_all();
         let (mn, alpha, alice) = wallet();
         let bob = "PxBobRocksFail000000000000000000000000000000000000000000000001";

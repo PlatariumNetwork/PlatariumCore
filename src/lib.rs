@@ -191,9 +191,13 @@ pub use core::dag::{
 pub use core::consistency::{
     check_consistency, check_consistency_json, check_consistency_store, ConsistencyReport,
 };
+pub use core::crash_failpoints::{
+    assert_height_hash_invariant, persist_staging_then_rocks, read_canonical_tip, TipPair,
+};
 pub use core::failpoints::{
     arm as failpoint_arm, clear as failpoint_clear, clear_all as failpoint_clear_all, hit as failpoint_hit,
-    is_armed as failpoint_is_armed, FP_FINALIZE_BEFORE_PERSIST, FP_JSON_STAGING_COMMIT,
+    is_armed as failpoint_is_armed, FP_AFTER_ROCKS_WRITE, FP_AFTER_STATE_WRITE, FP_BEFORE_COMMIT,
+    FP_BEFORE_ROCKS_WRITE, FP_BEFORE_STATE_WRITE, FP_FINALIZE_BEFORE_PERSIST, FP_JSON_STAGING_COMMIT,
     FP_ROCKS_COMMIT_ATOMIC, FP_ROCKS_WRITE_BATCH,
 };
 pub use core::finalize_contract::{

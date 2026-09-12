@@ -34,6 +34,7 @@ pub mod kernel;
 pub mod dag;
 pub mod finalize_contract;
 pub mod failpoints;
+pub mod crash_failpoints;
 pub mod consistency;
 pub mod unsafe_flags_inventory;
 pub mod runtime_gates;

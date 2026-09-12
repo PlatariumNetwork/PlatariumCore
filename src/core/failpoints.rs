@@ -15,14 +15,33 @@ pub const FP_ROCKS_COMMIT_ATOMIC: &str = "rocks_commit_atomic";
 /// Trip inside [`RocksStore::write_batch`](crate::storage::rocks::RocksStore::write_batch).
 pub const FP_ROCKS_WRITE_BATCH: &str = "rocks_write_batch";
 
+/// Trip before JSON staging state-file write (issue #55).
+pub const FP_BEFORE_STATE_WRITE: &str = "before_state_write";
+/// Trip after JSON staging state-file write succeeds (issue #56).
+pub const FP_AFTER_STATE_WRITE: &str = "after_state_write";
+/// Trip before Rocks payload WriteBatch (issue #57).
+pub const FP_BEFORE_ROCKS_WRITE: &str = "before_rocks_write";
+/// Trip after Rocks payload WriteBatch, before head/commit marker (issue #58).
+pub const FP_AFTER_ROCKS_WRITE: &str = "after_rocks_write";
+/// Trip before Rocks head/commit marker write (issue #59).
+pub const FP_BEFORE_COMMIT: &str = "before_commit";
+
 #[cfg(any(test, feature = "failpoints"))]
 mod active {
     use std::collections::HashSet;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     fn armed() -> &'static Mutex<HashSet<String>> {
         static ARMED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
         ARMED.get_or_init(|| Mutex::new(HashSet::new()))
+    }
+
+    /// Serialize tests that arm failpoints (process-global arming set).
+    pub fn test_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn arm(name: &str) {
@@ -49,6 +68,12 @@ mod active {
             .map(|g| g.contains(name))
             .unwrap_or(false)
     }
+}
+
+/// Hold while arming/tripping failpoints in tests (avoids cross-test races).
+#[cfg(any(test, feature = "failpoints"))]
+pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    active::test_lock()
 }
 
 /// Arm a named failpoint (no-op in production builds).
@@ -104,6 +129,7 @@ mod tests {
 
     #[test]
     fn harness_trips_named_failpoint_and_clears() {
+        let _guard = test_lock();
         clear_all();
         assert!(!is_armed(FP_FINALIZE_BEFORE_PERSIST));
         assert!(hit(FP_FINALIZE_BEFORE_PERSIST).is_ok());
