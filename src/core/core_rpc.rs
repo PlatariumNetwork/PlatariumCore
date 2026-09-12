@@ -29,7 +29,7 @@ use crate::{
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -804,6 +804,14 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
             crate::storage::rpc::rocks_list_address_txs_json(&db_path, &address)
         }
         "rocks_commit_block" => {
+            // R2-H1: raw rocks commit bypasses tx validate/kernel — require explicit allow.
+            // Prefer block_cycle after apply_txs (verified execution) instead.
+            if !crate::core::rpc_security::external_rocks_commit_allowed() {
+                return Err(PlatariumError::State(
+                    "rocks_commit_block disabled; commit only from verified execution (block_cycle with apply_txs) or set PLATARIUM_CORE_ALLOW_EXTERNAL_ROCKS_COMMIT=1 for recovery"
+                        .into(),
+                ));
+            }
             let db_path = param_str(params, "db_path")?;
             let commit = param_str(params, "commit")?;
             crate::storage::rpc::rocks_commit_block_json(&db_path, &commit)
@@ -813,11 +821,23 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
             crate::storage::rpc::rocks_list_snapshots_json(&db_path)
         }
         "rocks_bootstrap_snapshot" => {
+            if !crate::core::rpc_security::rocks_bootstrap_allowed() {
+                return Err(PlatariumError::State(
+                    "rocks_bootstrap_snapshot disabled on serve (set PLATARIUM_CORE_ALLOW_ROCKS_BOOTSTRAP=1 only for recovery)"
+                        .into(),
+                ));
+            }
             let db_path = param_str(params, "db_path")?;
             let snapshot = param_str(params, "snapshot")?;
             crate::storage::rpc::rocks_bootstrap_snapshot_json(&db_path, &snapshot)
         }
         "migrate_json_to_rocks" => {
+            if !crate::core::rpc_security::rocks_migrate_allowed() {
+                return Err(PlatariumError::State(
+                    "migrate_json_to_rocks disabled on serve (set PLATARIUM_CORE_ALLOW_ROCKS_MIGRATE=1 only for recovery)"
+                        .into(),
+                ));
+            }
             let db_path = param_str(params, "db_path")?;
             let chain = param_str(params, "chain_json")?;
             let accounts = param_opt_str(params, "accounts_json");
@@ -1147,6 +1167,10 @@ pub fn handle_rpc_line(line: &str) -> String {
         .get("auth_token")
         .and_then(|v| v.as_str())
         .or_else(|| params.get("auth_token").and_then(|v| v.as_str()));
+    let admin_token = req
+        .get("admin_token")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("admin_token").and_then(|v| v.as_str()));
 
     if method.is_empty() {
         return json!({
@@ -1157,7 +1181,9 @@ pub fn handle_rpc_line(line: &str) -> String {
         .to_string();
     }
 
-    if let Err(e) = crate::core::rpc_security::authorize_rpc_method(method, auth_token) {
+    if let Err(e) =
+        crate::core::rpc_security::authorize_rpc_method_with_admin(method, auth_token, admin_token)
+    {
         return json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -1198,37 +1224,74 @@ pub fn handle_rpc_line(line: &str) -> String {
     }
 }
 
+/// Read one newline-delimited RPC request with a hard byte cap (R2-M1).
+///
+/// Returns `Ok(None)` on EOF, `Ok(Some(line))` on a complete line within the limit,
+/// or `Err` when the line exceeds `max_bytes` (remainder of the line is drained).
+pub fn read_limited_rpc_line<R: BufRead>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> std::io::Result<Option<String>> {
+    let mut buf: Vec<u8> = Vec::new();
+    let n = {
+        let mut limited = reader.by_ref().take((max_bytes as u64).saturating_add(1));
+        limited.read_until(b'\n', &mut buf)?
+    };
+    if n == 0 {
+        return Ok(None);
+    }
+    let oversized = buf.len() > max_bytes || (buf.len() == max_bytes + 1 && !buf.ends_with(b"\n"));
+    if oversized {
+        if !buf.ends_with(b"\n") {
+            let mut discard = [0u8; 4096];
+            loop {
+                match reader.read(&mut discard) {
+                    Ok(0) => break,
+                    Ok(n) if discard[..n].contains(&b'\n') => break,
+                    Ok(_) => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("request too large (max {} bytes)", max_bytes),
+        ));
+    }
+    let line = match String::from_utf8(buf) {
+        Ok(s) => s,
+        Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+    };
+    Ok(Some(line))
+}
+
 fn serve_connection<S: std::io::Read + Write + Send + 'static>(stream: S) {
     let mut reader = BufReader::new(stream);
     loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => {
+        let max = crate::core::rpc_security::MAX_RPC_LINE_BYTES;
+        match read_limited_rpc_line(&mut reader, max) {
+            Ok(None) => break,
+            Ok(Some(line)) => {
                 if line.trim().is_empty() {
                     continue;
-                }
-                // Cap before full parse when BufRead already buffered past limit (M2).
-                if line.len() > crate::core::rpc_security::MAX_RPC_LINE_BYTES {
-                    let err = json!({
-                        "jsonrpc": "2.0",
-                        "id": null,
-                        "error": {
-                            "code": -32600,
-                            "message": format!(
-                                "request too large (max {} bytes)",
-                                crate::core::rpc_security::MAX_RPC_LINE_BYTES
-                            )
-                        }
-                    })
-                    .to_string();
-                    let _ = writeln!(reader.get_mut(), "{}", err);
-                    break;
                 }
                 let response = handle_rpc_line(&line);
                 if writeln!(reader.get_mut(), "{}", response).is_err() {
                     break;
                 }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                let err = json!({
+                    "jsonrpc": "2.0",
+                    "id": null,
+                    "error": {
+                        "code": -32600,
+                        "message": e.to_string()
+                    }
+                })
+                .to_string();
+                let _ = writeln!(reader.get_mut(), "{}", err);
+                break;
             }
             Err(_) => break,
         }

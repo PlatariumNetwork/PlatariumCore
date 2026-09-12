@@ -1,8 +1,9 @@
 //! Medium (M1–M6) security/correctness coverage.
 
-use platarium_core::core::core_rpc::{dispatch_rpc, handle_rpc_line};
+use platarium_core::core::core_rpc::{dispatch_rpc, handle_rpc_line, read_limited_rpc_line};
 use platarium_core::core::rpc_security::{dag_reset_allowed, MAX_RPC_LINE_BYTES};
 use serde_json::json;
+use std::io::Cursor;
 use std::sync::Mutex;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -46,6 +47,26 @@ fn m2_rpc_line_size_limit() {
     let resp: serde_json::Value = serde_json::from_str(&handle_rpc_line(&oversized)).unwrap();
     let msg = resp["error"]["message"].as_str().unwrap_or("");
     assert!(msg.contains("too large"), "line={} msg={msg}", line.len());
+}
+
+/// R2-M1: size check must reject before an unbounded buffer is allocated.
+#[test]
+fn r2_m1_limited_reader_rejects_before_unbounded_alloc() {
+    let max = 64usize;
+    let mut huge = "x".repeat(max + 100);
+    huge.push('\n');
+    let mut cursor = Cursor::new(huge.into_bytes());
+    let err = read_limited_rpc_line(&mut cursor, max).unwrap_err();
+    assert!(
+        err.to_string().contains("too large"),
+        "{err}"
+    );
+    // Remainder drained — next read is EOF.
+    assert!(read_limited_rpc_line(&mut cursor, max).unwrap().is_none());
+
+    let mut ok = Cursor::new(b"{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}\n".to_vec());
+    let line = read_limited_rpc_line(&mut ok, max).unwrap().unwrap();
+    assert!(line.contains("ping"));
 }
 
 #[test]

@@ -1,4 +1,8 @@
 //! JSON CLI/RPC wrappers for RocksDB storage.
+//!
+//! CLI one-shots may call these directly. The long-lived `serve` / JSON-RPC path
+//! must gate `rocks_commit_block`, `rocks_bootstrap_snapshot`, and
+//! `migrate_json_to_rocks` via `rpc_security` ALLOW flags + admin token (R2-H1).
 
 use crate::error::{PlatariumError, Result};
 use crate::storage::commit::{BlockCommit, commit_block};

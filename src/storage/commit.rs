@@ -1,4 +1,9 @@
 //! Atomic block commit via RocksDB WriteBatch.
+//!
+//! R2-H1: RPC must not accept arbitrary BlockCommit payloads with only the shared
+//! Gateway token. Serve-path commits go through verified execution (`block_cycle`
+//! after `apply_txs`) or an explicit admin ALLOW + admin token escape hatch.
+//! See [`assert_commit_allowed_after_execution`] and `rpc_security`.
 
 use crate::error::{PlatariumError, Result};
 use crate::storage::rocks::RocksStore;
@@ -9,6 +14,39 @@ use crate::storage::schema::{
 use crate::storage::snapshot::create_snapshot_if_due;
 use rocksdb::WriteBatch;
 use serde::{Deserialize, Serialize};
+
+/// Gate for Rocks commits attached to a verified execution path (R2-H1).
+///
+/// Accepts when `apply_txs` ran and `commit.state_root` matches `executed_state_root`,
+/// or when `external_allowed` (recovery ALLOW flag) is set.
+pub fn assert_commit_allowed_after_execution(
+    apply_txs: bool,
+    executed_state_root: Option<&str>,
+    commit_json: &str,
+    external_allowed: bool,
+) -> Result<()> {
+    if external_allowed {
+        return Ok(());
+    }
+    if !apply_txs {
+        return Err(PlatariumError::State(
+            "rocks commit requires verified execution: set apply_txs=true (or PLATARIUM_CORE_ALLOW_EXTERNAL_ROCKS_COMMIT=1)"
+                .into(),
+        ));
+    }
+    let commit: BlockCommit = serde_json::from_str(commit_json).map_err(|e| {
+        PlatariumError::State(format!("invalid BlockCommit JSON for verified gate: {}", e))
+    })?;
+    match executed_state_root {
+        Some(root) if root == commit.state_root && root == commit.block.state_root => Ok(()),
+        Some(_) => Err(PlatariumError::State(
+            "rocks commit rejected: commit state_root does not match verified execution root".into(),
+        )),
+        None => Err(PlatariumError::State(
+            "rocks commit rejected: missing verified execution state_root".into(),
+        )),
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AccountRecord {
@@ -218,5 +256,27 @@ mod tests {
         // Intentionally do not write — simulates crash before commit.
         assert_eq!(store.head_height().unwrap(), 0);
         assert!(get_tx(&store, "aabb").unwrap().is_none());
+    }
+
+    #[test]
+    fn verified_execution_gate_rejects_unapplied_commit() {
+        let json = serde_json::to_string(&sample_commit(1)).unwrap();
+        let err = assert_commit_allowed_after_execution(false, Some("root1"), &json, false)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("verified execution")
+                || err.to_string().contains("apply_txs"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn verified_execution_gate_accepts_matching_root() {
+        let json = serde_json::to_string(&sample_commit(1)).unwrap();
+        assert!(assert_commit_allowed_after_execution(true, Some("root1"), &json, false).is_ok());
+        let err = assert_commit_allowed_after_execution(true, Some("other"), &json, false)
+            .unwrap_err();
+        assert!(err.to_string().contains("state_root"), "{err}");
+        assert!(assert_commit_allowed_after_execution(false, None, &json, true).is_ok());
     }
 }

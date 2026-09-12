@@ -18,7 +18,8 @@ pub use engine::{
 };
 
 pub use commit::{
-    AccountRecord, BlockCommit, BlockRecordStored, ReceiptRecord, build_commit_batch, commit_block,
+    AccountRecord, BlockCommit, BlockRecordStored, ReceiptRecord, assert_commit_allowed_after_execution,
+    build_commit_batch, commit_block,
 };
 pub use query::{
     get_account, get_block, get_head, get_receipt, get_state_root, get_tx,

@@ -126,3 +126,132 @@ fn handshake_rpc_ok() {
     let out = dispatch_rpc("handshake", &json!({})).unwrap();
     assert!(out.contains("\"protocol\":2") || out.contains("\"protocol\": 2"), "{out}");
 }
+
+/// R2-H1: rocks_commit / migrate / bootstrap must not be writable with only the shared RPC token.
+#[test]
+fn r2_h1_rocks_admin_methods_disabled_by_default() {
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::remove_var("PLATARIUM_CORE_ALLOW_EXTERNAL_ROCKS_COMMIT");
+    std::env::remove_var("PLATARIUM_CORE_ALLOW_ROCKS_MIGRATE");
+    std::env::remove_var("PLATARIUM_CORE_ALLOW_ROCKS_BOOTSTRAP");
+    std::env::set_var("PLATARIUM_CORE_RPC_INSECURE", "1");
+
+    let err = dispatch_rpc(
+        "rocks_commit_block",
+        &json!({
+            "db_path": "/tmp/platarium-r2h1-nonexistent",
+            "commit": "{}"
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("disabled")
+            || err.to_string().contains("verified execution")
+            || err.to_string().contains("ALLOW_EXTERNAL_ROCKS"),
+        "{err}"
+    );
+
+    let err = dispatch_rpc(
+        "rocks_bootstrap_snapshot",
+        &json!({
+            "db_path": "/tmp/platarium-r2h1-nonexistent",
+            "snapshot": "{}"
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("disabled") || err.to_string().contains("ALLOW_ROCKS_BOOTSTRAP"),
+        "{err}"
+    );
+
+    let err = dispatch_rpc(
+        "migrate_json_to_rocks",
+        &json!({
+            "db_path": "/tmp/platarium-r2h1-nonexistent",
+            "chain_json": "{\"blocks\":[]}"
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("disabled") || err.to_string().contains("ALLOW_ROCKS_MIGRATE"),
+        "{err}"
+    );
+
+    std::env::remove_var("PLATARIUM_CORE_RPC_INSECURE");
+    std::env::remove_var("PLATARIUM_CORE_RPC_TOKEN");
+    std::env::remove_var("PLATARIUM_CORE_ADMIN_TOKEN");
+}
+
+#[test]
+fn r2_h1_rocks_admin_requires_admin_token_on_serve() {
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::remove_var("PLATARIUM_CORE_RPC_INSECURE");
+    std::env::set_var("PLATARIUM_CORE_RPC_TOKEN", "rpc-h1");
+    std::env::set_var("PLATARIUM_CORE_ADMIN_TOKEN", "admin-h1");
+    std::env::set_var("PLATARIUM_CORE_ALLOW_EXTERNAL_ROCKS_COMMIT", "1");
+
+    let denied = handle_rpc_line(
+        r#"{"jsonrpc":"2.0","id":1,"auth_token":"rpc-h1","method":"rocks_commit_block","params":{"db_path":"x","commit":"{}"}}"#,
+    );
+    assert!(
+        denied.contains("-32001")
+            || denied.contains("admin")
+            || denied.contains("unauthorized"),
+        "{denied}"
+    );
+
+    // Admin token present — auth passes; dispatch still needs a real DB, but must not fail on ACL.
+    let with_admin = handle_rpc_line(
+        r#"{"jsonrpc":"2.0","id":2,"auth_token":"rpc-h1","admin_token":"admin-h1","method":"rocks_commit_block","params":{"db_path":"/tmp/platarium-r2h1-no-db","commit":"not-json"}}"#,
+    );
+    assert!(
+        !with_admin.contains("admin_token") && !with_admin.contains("RPC unauthorized"),
+        "admin ACL should pass: {with_admin}"
+    );
+    assert!(
+        with_admin.contains("invalid")
+            || with_admin.contains("BlockCommit")
+            || with_admin.contains("-32000")
+            || with_admin.contains("error"),
+        "{with_admin}"
+    );
+
+    std::env::remove_var("PLATARIUM_CORE_RPC_TOKEN");
+    std::env::remove_var("PLATARIUM_CORE_ADMIN_TOKEN");
+    std::env::remove_var("PLATARIUM_CORE_ALLOW_EXTERNAL_ROCKS_COMMIT");
+}
+
+/// R2-M2: read token must not authorize mutate or rocks admin.
+#[test]
+fn r2_m2_tiered_tokens_separate_read_mutate_admin() {
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::remove_var("PLATARIUM_CORE_RPC_INSECURE");
+    std::env::remove_var("PLATARIUM_CORE_RPC_TOKEN");
+    std::env::set_var("PLATARIUM_CORE_RPC_READ_TOKEN", "read-tok");
+    std::env::set_var("PLATARIUM_CORE_RPC_MUTATE_TOKEN", "mutate-tok");
+    std::env::set_var("PLATARIUM_CORE_ADMIN_TOKEN", "admin-tok");
+
+    assert!(authorize_rpc_method("state_query", Some("read-tok")).is_ok());
+    assert!(authorize_rpc_method("state_credit", Some("read-tok")).is_err());
+    assert!(authorize_rpc_method("state_credit", Some("mutate-tok")).is_ok());
+
+    let denied = handle_rpc_line(
+        r#"{"jsonrpc":"2.0","id":1,"auth_token":"read-tok","method":"state_init","params":{"state_file":"/tmp/x"}}"#,
+    );
+    assert!(
+        denied.contains("-32001") || denied.contains("unauthorized"),
+        "{denied}"
+    );
+
+    let rocks_denied = handle_rpc_line(
+        r#"{"jsonrpc":"2.0","id":2,"auth_token":"mutate-tok","method":"rocks_commit_block","params":{"db_path":"x","commit":"{}"}}"#,
+    );
+    assert!(
+        rocks_denied.contains("admin") || rocks_denied.contains("unauthorized") || rocks_denied.contains("-32001"),
+        "{rocks_denied}"
+    );
+
+    std::env::remove_var("PLATARIUM_CORE_RPC_READ_TOKEN");
+    std::env::remove_var("PLATARIUM_CORE_RPC_MUTATE_TOKEN");
+    std::env::remove_var("PLATARIUM_CORE_ADMIN_TOKEN");
+}

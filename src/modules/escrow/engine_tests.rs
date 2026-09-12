@@ -27,6 +27,7 @@ mod escrow_engine_tests {
                 &locker,
                 "eid-1",
                 &payee,
+                &node, // bind node at lock (C5)
                 1_000_000,
                 &Asset::PLP,
                 PURPOSE_CONTACT,
@@ -41,6 +42,7 @@ mod escrow_engine_tests {
         assert_eq!(e.status, EscrowStatus::Locked);
         assert_eq!(e.purpose, PURPOSE_CONTACT);
         assert!(!e.rules_hash.is_empty());
+        assert_eq!(e.node, node);
 
         let bindings = AddressBindings {
             sender: locker.clone(),
@@ -79,6 +81,7 @@ mod escrow_engine_tests {
                 &locker,
                 "eid-2",
                 "recv",
+                "node2",
                 500_000,
                 &Asset::PLP,
                 PURPOSE_CONTACT,
@@ -154,6 +157,7 @@ mod escrow_engine_tests {
                 &locker,
                 "dup",
                 &settler,
+                "N",
                 10_000,
                 &Asset::PLP,
                 PURPOSE_CONTACT,
@@ -220,6 +224,7 @@ mod escrow_engine_tests {
                 &locker,
                 "bad-amt",
                 &settler,
+                "N",
                 100_000,
                 &Asset::PLP,
                 PURPOSE_CONTACT,
@@ -265,6 +270,7 @@ mod escrow_engine_tests {
                 &locker,
                 "ref-1",
                 &settler,
+                "",
                 200_000,
                 &Asset::PLP,
                 PURPOSE_CONTACT,
@@ -295,6 +301,7 @@ mod escrow_engine_tests {
                 &locker,
                 "can-1",
                 "Rb",
+                "",
                 100_000,
                 &Asset::PLP,
                 PURPOSE_CONTACT,
@@ -325,6 +332,7 @@ mod escrow_engine_tests {
                 &locker,
                 "unauth-1",
                 &beneficiary,
+                "N",
                 100_000,
                 &Asset::PLP,
                 PURPOSE_CONTACT,
@@ -356,6 +364,152 @@ mod escrow_engine_tests {
         assert_eq!(
             state.get_escrow("unauth-1").unwrap().status,
             EscrowStatus::Locked
+        );
+    }
+
+    #[test]
+    fn settle_payee_redirect_rejected_without_fee_burn() {
+        // C5: locked beneficiary cannot be overridden via settle bindings.
+        let state = State::new();
+        let locker = "Lp".to_string();
+        let beneficiary = "Bp".to_string();
+        let attacker = "Ap".to_string();
+        state.set_balance(&locker, 1_000_000);
+        state.set_uplp_balance(&locker, 5);
+        state.set_uplp_balance(&beneficiary, 10);
+        state
+            .escrow_lock(
+                &locker,
+                "redir-1",
+                &beneficiary,
+                "N",
+                100_000,
+                &Asset::PLP,
+                PURPOSE_CONTACT,
+                0,
+                0,
+                "lh",
+                1,
+                None,
+            )
+            .unwrap();
+        let err = state.escrow_settle(
+            &beneficiary,
+            "redir-1",
+            100_000,
+            1,
+            OUTCOME_ACCEPT,
+            AddressBindings {
+                sender: locker,
+                receiver: attacker,
+                node: "N".into(),
+                treasury: "treasury".into(),
+                burn: "burn".into(),
+            },
+            "sh",
+            None,
+        );
+        assert!(err.is_err());
+        assert_eq!(state.get_uplp_balance(&beneficiary), 10);
+        assert_eq!(
+            state.get_escrow("redir-1").unwrap().status,
+            EscrowStatus::Locked
+        );
+    }
+
+    #[test]
+    fn settle_node_redirect_rejected_without_fee_burn() {
+        // R2-H5: locked node cannot be overridden via settle bindings.
+        let state = State::new();
+        let locker = "Ln".to_string();
+        let beneficiary = "Bn".to_string();
+        let locked_node = "NodeLock".to_string();
+        let attacker_node = "NodeAttack".to_string();
+        state.set_balance(&locker, 1_000_000);
+        state.set_uplp_balance(&locker, 5);
+        state.set_uplp_balance(&beneficiary, 10);
+        state
+            .escrow_lock(
+                &locker,
+                "redir-n",
+                &beneficiary,
+                &locked_node,
+                100_000,
+                &Asset::PLP,
+                PURPOSE_CONTACT,
+                0,
+                0,
+                "lh",
+                1,
+                None,
+            )
+            .unwrap();
+        let err = state.escrow_settle(
+            &beneficiary,
+            "redir-n",
+            100_000,
+            1,
+            OUTCOME_ACCEPT,
+            AddressBindings {
+                sender: locker,
+                receiver: beneficiary.clone(),
+                node: attacker_node,
+                treasury: "treasury".into(),
+                burn: "burn".into(),
+            },
+            "sh",
+            None,
+        );
+        assert!(err.is_err());
+        assert_eq!(state.get_uplp_balance(&beneficiary), 10);
+        assert_eq!(
+            state.get_escrow("redir-n").unwrap().status,
+            EscrowStatus::Locked
+        );
+    }
+
+    #[test]
+    fn unauthorized_cancel_and_refund_rejected() {
+        let state = State::new();
+        let locker = "Lc2".to_string();
+        let beneficiary = "Bc2".to_string();
+        let stranger = "Sc2".to_string();
+        state.set_balance(&locker, 1_000_000);
+        state.set_uplp_balance(&locker, 5);
+        state.set_uplp_balance(&stranger, 10);
+        state.set_uplp_balance(&beneficiary, 10);
+        state
+            .escrow_lock(
+                &locker,
+                "auth-cr",
+                &beneficiary,
+                "",
+                50_000,
+                &Asset::PLP,
+                PURPOSE_CONTACT,
+                0,
+                0,
+                "lh",
+                1,
+                None,
+            )
+            .unwrap();
+        assert!(state.escrow_cancel(&stranger, "auth-cr", 1, None).is_err());
+        assert!(state.escrow_cancel(&beneficiary, "auth-cr", 1, None).is_err());
+        assert_eq!(state.get_uplp_balance(&stranger), 10);
+        assert_eq!(state.get_uplp_balance(&beneficiary), 10);
+        assert_eq!(
+            state.get_escrow("auth-cr").unwrap().status,
+            EscrowStatus::Locked
+        );
+
+        // Stranger cannot refund; beneficiary can.
+        assert!(state.escrow_refund(&stranger, "auth-cr", 1, None).is_err());
+        assert_eq!(state.get_uplp_balance(&stranger), 10);
+        state.escrow_refund(&beneficiary, "auth-cr", 1, None).unwrap();
+        assert_eq!(
+            state.get_escrow("auth-cr").unwrap().status,
+            EscrowStatus::Refunded
         );
     }
 

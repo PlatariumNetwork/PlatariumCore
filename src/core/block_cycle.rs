@@ -19,8 +19,11 @@ use std::path::Path;
 /// - `block_number`, `previous_hash`, `timestamp`, `producer_id` (required for assemble)
 /// - `auto_confirm` (bool, default false) — synthesize L1/L2 Confirm votes (solo/test only; P0)
 /// - `apply_txs` (bool, default false) — apply L1-valid txs to state_file after assemble
-/// - `commit` (optional string) — BlockCommit JSON for RocksDB when `db_path` set
-/// - `db_path` (optional) — RocksDB path for `rocks_commit_block`
+/// - `commit` (optional string) — BlockCommit JSON for RocksDB when `db_path` set.
+///   R2-H1: accepted only after verified execution (`apply_txs=true` and commit
+///   `state_root` matches the post-apply root), unless
+///   `PLATARIUM_CORE_ALLOW_EXTERNAL_ROCKS_COMMIT=1`.
+/// - `db_path` (optional) — RocksDB path for verified `rocks_commit_block`
 pub fn block_cycle_json(params: &Value) -> Result<String> {
     let state_file = params
         .get("state_file")
@@ -178,6 +181,14 @@ pub fn block_cycle_json(params: &Value) -> Result<String> {
         params.get("commit").and_then(|v| v.as_str()),
     ) {
         if !db_path.is_empty() && !commit.is_empty() {
+            // R2-H1: commit only from verified execution (apply_txs + matching state_root),
+            // unless external rocks commit is explicitly allowed for recovery.
+            crate::storage::commit::assert_commit_allowed_after_execution(
+                apply_txs,
+                final_state_root.as_deref(),
+                commit,
+                crate::core::rpc_security::external_rocks_commit_allowed(),
+            )?;
             let out = crate::storage::rpc::rocks_commit_block_json(db_path, commit)?;
             rocks_commit = Some(
                 serde_json::from_str(&out)

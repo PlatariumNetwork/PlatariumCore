@@ -55,6 +55,9 @@ pub struct Escrow {
     pub escrow_id: String,
     pub creator: String,
     pub beneficiary: String,
+    /// Node operator bound at lock time (C5 / R2-H5). Empty ⇒ legacy unset.
+    #[serde(default)]
+    pub node: String,
     pub amount: u128,
     /// Asset canonical string (e.g. "PLP").
     pub asset: String,
@@ -93,4 +96,6 @@ pub enum EscrowError {
     Replay,
     #[error("unauthorized settler for outcome {0}")]
     UnauthorizedSettler(String),
+    #[error("settle binding mismatch for role {0}")]
+    BindingMismatch(String),
 }
