@@ -73,9 +73,7 @@ pub fn execute_ordered_batch(
         for (i, tx) in batch.transactions.iter().enumerate() {
             let receipt = run_one_tx(&working, i as u32, tx);
             if receipt.status == "ok" {
-                for a in touch_set(tx) {
-                    touched.insert(a);
-                }
+                record_touched(&working, tx, &mut touched);
             }
             receipts[i] = receipt;
         }
@@ -160,13 +158,31 @@ fn execute_parallel_waves(
                             tx.hash, e
                         ))
                     })?;
-                for a in touch_set(tx) {
-                    touched.insert(a);
-                }
+                record_touched(working, tx, touched);
             }
         }
     }
     Ok(())
+}
+
+/// R2-M7: touch-set from tx fields plus lock-time escrow bindings (creator/beneficiary/node).
+fn record_touched(state: &State, tx: &Transaction, touched: &mut BTreeSet<String>) {
+    for a in touch_set(tx) {
+        touched.insert(a);
+    }
+    if let Some(eid) = tx.escrow_id() {
+        if let Some(entry) = state.get_escrow(eid) {
+            if !entry.creator.is_empty() {
+                touched.insert(entry.creator);
+            }
+            if !entry.beneficiary.is_empty() {
+                touched.insert(entry.beneficiary);
+            }
+            if !entry.node.is_empty() {
+                touched.insert(entry.node);
+            }
+        }
+    }
 }
 
 fn collect_account_images(state: &State, touched: &BTreeSet<String>) -> Vec<AccountPostImage> {

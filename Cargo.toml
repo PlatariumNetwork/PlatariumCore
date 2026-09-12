@@ -43,6 +43,8 @@ anyhow = "1.0"
 rand = "0.8"
 # Byte manipulation
 bytes = "1.5"
+# Constant-time comparisons (RPC auth tokens — R2-L1)
+subtle = "2.5"
 # CLI argument parsing
 clap = { version = "4.5", features = ["derive"] }
 # Canonical chain storage (native C++ via librocksdb-sys; first build is slow)

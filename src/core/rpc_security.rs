@@ -174,19 +174,13 @@ fn is_secret_method(method: &str) -> bool {
     SECRET_METHODS.iter().any(|m| *m == method)
 }
 
-/// Constant-time equality for auth tokens (R2-L1). Length mismatches still
-/// short-circuit (token length is not secret), but equal-length compares are
-/// byte-wise XOR accumulated without early exit.
+/// Constant-time equality for auth tokens (R2-L1) via `subtle::ConstantTimeEq`.
+/// Length mismatches still short-circuit (token length is not secret).
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    // Prevent the compiler from short-circuiting the loop via early return.
-    std::hint::black_box(diff) == 0
+    bool::from(subtle::ConstantTimeEq::ct_eq(a, b))
 }
 
 fn token_matches(provided: Option<&str>, expected: &str) -> bool {

@@ -81,35 +81,31 @@ fn m5_ping_does_not_require_state_lock_path() {
     assert!(resp.get("error").is_none() || resp["error"].is_null(), "{resp}");
 }
 
-/// R2-M3: relative and absolute paths to the same file share one dispatch lock key.
+/// R2-M3: relative, absolute, and symlink paths to the same inode share one lock key.
 #[test]
 fn r2_m3_path_lock_key_collapses_relative_and_absolute() {
+    use platarium_core::core::core_rpc::path_lock_key;
     use std::fs::File;
     use tempfile::TempDir;
     let dir = TempDir::new().unwrap();
     let file = dir.path().join("state.json");
     File::create(&file).unwrap();
     let abs = std::fs::canonicalize(&file).unwrap();
-    // Same inode via absolute path string and via the same path again.
-    let key_a = {
-        // Exercise through RPC: concurrent apply is hard to assert; check canonicalize parity.
-        let a = abs.to_string_lossy().to_string();
-        let b = file.to_string_lossy().to_string();
-        assert_ne!(a, b, "paths should differ as strings");
-        // Both paths must resolve to an existing file for inode keying.
-        assert!(std::fs::metadata(&a).is_ok());
-        assert!(std::fs::metadata(&b).is_ok());
-        let meta_a = std::fs::metadata(&a).unwrap();
-        let meta_b = std::fs::metadata(&b).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            assert_eq!(meta_a.dev(), meta_b.dev());
-            assert_eq!(meta_a.ino(), meta_b.ino());
-        }
-        a
-    };
-    assert!(!key_a.is_empty());
+    let a = abs.to_string_lossy().to_string();
+    let b = file.to_string_lossy().to_string();
+    assert_ne!(a, b, "paths should differ as strings");
+    let key_abs = path_lock_key(&a);
+    let key_rel = path_lock_key(&b);
+    assert_eq!(key_abs, key_rel, "relative and absolute must share lock key");
+    assert!(key_abs.starts_with("ino:") || key_abs.starts_with("path:"), "{key_abs}");
+
+    #[cfg(unix)]
+    {
+        let link = dir.path().join("state-link.json");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let key_link = path_lock_key(&link.to_string_lossy());
+        assert_eq!(key_abs, key_link, "symlink must share inode lock key");
+    }
 }
 
 /// R2-M4: missing settle outcome must not default to accept.

@@ -59,7 +59,7 @@ fn lock_or_poison(m: &Mutex<()>) -> Result<std::sync::MutexGuard<'_, ()>> {
 
 /// Stable lock key for `state_file` / `db_path` so relative paths, absolutes, and
 /// symlinks that resolve to the same inode share one mutex (R2-M3).
-fn path_lock_key(path: &str) -> String {
+pub fn path_lock_key(path: &str) -> String {
     let p = Path::new(path);
     #[cfg(unix)]
     {

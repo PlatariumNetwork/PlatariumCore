@@ -2,18 +2,36 @@
 
 use crate::core::state::TREASURY_ADDRESS;
 use crate::core::transaction::Transaction;
+use crate::modules::escrow::types::{
+    BURN_ROLE, TX_KIND_ESCROW_CANCEL, TX_KIND_ESCROW_LOCK, TX_KIND_ESCROW_REFUND,
+    TX_KIND_ESCROW_SETTLE,
+};
 use std::collections::BTreeSet;
+
+fn is_escrow_effect_kind(tx: &Transaction) -> bool {
+    matches!(
+        tx.effective_tx_kind().unwrap_or(""),
+        TX_KIND_ESCROW_LOCK
+            | TX_KIND_ESCROW_SETTLE
+            | TX_KIND_ESCROW_REFUND
+            | TX_KIND_ESCROW_CANCEL
+    )
+}
 
 /// Addresses touched by a tx (for StateDiff account collection).
 /// Includes treasury because fees credit the fee sink.
+/// R2-M7: escrow settle/refund/cancel also touch the burn role sink.
 pub fn touch_set(tx: &Transaction) -> BTreeSet<String> {
     let mut set = conflict_touch_set(tx);
     set.insert(TREASURY_ADDRESS.to_string());
+    if is_escrow_effect_kind(tx) {
+        set.insert(BURN_ROLE.to_string());
+    }
     set
 }
 
 /// Addresses that conflict if shared across concurrent txs in a wave.
-/// Treasury is intentionally **excluded**: fee credits are commutative and
+/// Treasury/burn are intentionally **excluded**: fee/burn credits are commutative and
 /// applied in batch-index order during merge (see `execute_parallel_waves`).
 ///
 /// R2-M7: include `settle_payee` / `settle_node` so escrow settle credits cannot
@@ -79,11 +97,16 @@ mod tests {
             "s2".into(),
         )
         .unwrap();
+        tx.tx_kind = Some(TX_KIND_ESCROW_SETTLE.into());
         tx.settle_payee = Some("PayeeAddr".into());
         tx.settle_node = Some("NodeAddr".into());
         let t = conflict_touch_set(&tx);
         assert!(t.contains("PayeeAddr"));
         assert!(t.contains("NodeAddr"));
         assert!(t.contains("Settler"));
+        let full = touch_set(&tx);
+        assert!(full.contains(BURN_ROLE));
+        assert!(full.contains(TREASURY_ADDRESS));
+        assert!(!t.contains(BURN_ROLE), "burn must not serialize parallel waves");
     }
 }
