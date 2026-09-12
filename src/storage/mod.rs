@@ -14,7 +14,8 @@ pub mod rpc;
 
 pub use cache::{evict_cached, open_cached};
 pub use engine::{
-    InMemoryStorageEngine, RocksAccountStorageEngine, StateFileStorageEngine, StorageEngine,
+    account_record_from_post_image, InMemoryStorageEngine, RocksAccountStorageEngine,
+    StateFileStorageEngine, StorageEngine,
 };
 
 pub use commit::{

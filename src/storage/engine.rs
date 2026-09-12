@@ -14,6 +14,26 @@ use crate::storage::schema::{key_account, key_escrow, KEY_META_ESCROWS, PREFIX_E
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Map a StateDiff [`AccountPostImage`] into a Rocks [`AccountRecord`].
+///
+/// Copies `token_balances` into `tokens` and derives `xp` from the canonical
+/// `Token:XP` entry (default `"0"` when absent).
+pub fn account_record_from_post_image(a: &AccountPostImage) -> AccountRecord {
+    let xp = a
+        .token_balances
+        .get(&Asset::xp().as_canonical())
+        .cloned()
+        .unwrap_or_else(|| "0".into());
+    AccountRecord {
+        address: a.address.clone(),
+        balance: a.plp_balance.clone(),
+        uplp_balance: a.uplp_balance.clone(),
+        nonce: a.nonce,
+        tokens: a.token_balances.clone(),
+        xp,
+    }
+}
+
 /// Abstract durable account store for CommitEngine.
 pub trait StorageEngine {
     fn begin(&mut self) -> Result<()>;
@@ -274,19 +294,7 @@ impl StorageEngine for RocksAccountStorageEngine {
         let store = open_cached(&self.db_path)?;
         let mut batch = rocksdb::WriteBatch::default();
         for a in &self.staging {
-            let xp = a
-                .token_balances
-                .get(&crate::core::asset::Asset::xp().as_canonical())
-                .cloned()
-                .unwrap_or_else(|| "0".into());
-            let rec = AccountRecord {
-                address: a.address.clone(),
-                balance: a.plp_balance.clone(),
-                uplp_balance: a.uplp_balance.clone(),
-                nonce: a.nonce,
-                tokens: a.token_balances.clone(),
-                xp,
-            };
+            let rec = account_record_from_post_image(a);
             let bytes = serde_json::to_vec(&rec)
                 .map_err(|e| PlatariumError::State(format!("encode account: {}", e)))?;
             batch.put(key_account(&a.address), bytes);
@@ -397,6 +405,7 @@ fn apply_escrows_to_state(state: &State, escrows_json: &[String]) -> Result<()> 
 mod tests {
     use super::*;
     use crate::core::kernel::state_diff::AccountPostImage;
+    use crate::storage::schema::key_account;
     use tempfile::TempDir;
 
     #[test]
@@ -450,5 +459,69 @@ mod tests {
         let got = eng.get_account("PxA").unwrap();
         assert_eq!(got.plp_balance, "1");
         assert_eq!(got.nonce, 0);
+    }
+
+    /// Issue #34: StateDiff token_balances/xp map into Rocks AccountRecord WriteBatch.
+    #[test]
+    fn state_diff_tokens_xp_reach_rocks_write_batch() {
+        use crate::core::kernel::commit_engine::commit_state_diff;
+        use crate::core::kernel::state_diff::{StateDiff, STATE_DIFF_SCHEMA_VERSION};
+        use crate::storage::cache::evict_cached;
+        use crate::storage::commit::AccountRecord;
+        use std::collections::BTreeMap;
+
+        let mut tokens = BTreeMap::new();
+        tokens.insert(Asset::xp().as_canonical(), "150".into());
+        tokens.insert("Token:USDT".into(), "42".into());
+        let image = AccountPostImage {
+            address: "PxTok".into(),
+            plp_balance: "1000".into(),
+            uplp_balance: "3".into(),
+            nonce: 5,
+            token_balances: tokens.clone(),
+        };
+        let mapped = account_record_from_post_image(&image);
+        assert_eq!(mapped.balance, "1000");
+        assert_eq!(mapped.nonce, 5);
+        assert_eq!(mapped.xp, "150");
+        assert_eq!(mapped.tokens.get("Token:USDT").map(String::as_str), Some("42"));
+        assert_eq!(
+            mapped.tokens.get(&Asset::xp().as_canonical()).map(String::as_str),
+            Some("150")
+        );
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("rocks");
+        let mut eng = RocksAccountStorageEngine::open(&db_path).unwrap();
+        let diff = StateDiff {
+            schema_version: STATE_DIFF_SCHEMA_VERSION,
+            batch_id: "tok-xp".into(),
+            receipts: vec![],
+            accounts: vec![image],
+            pre_state_root: None,
+            post_state_root: "root-tok".into(),
+            escrows_json: None,
+        };
+        let res = commit_state_diff(&mut eng, &diff).unwrap();
+        assert!(res.ok, "{:?}", res.error);
+
+        // Prove encoded AccountRecord bytes (WriteBatch payload) carry tokens/xp.
+        let store = crate::storage::cache::open_cached(&db_path).unwrap();
+        let raw = store
+            .get(&key_account("PxTok"))
+            .unwrap()
+            .expect("account key written by WriteBatch");
+        let rec: AccountRecord = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(rec.xp, "150");
+        assert_eq!(rec.tokens.get("Token:USDT").map(String::as_str), Some("42"));
+        assert_eq!(rec.balance, "1000");
+        assert_eq!(rec.nonce, 5);
+
+        let got = eng.get_account("PxTok").unwrap();
+        assert_eq!(
+            got.token_balances.get(&Asset::xp().as_canonical()).map(String::as_str),
+            Some("150")
+        );
+        evict_cached(&db_path);
     }
 }

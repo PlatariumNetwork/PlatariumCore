@@ -34,8 +34,9 @@ pub fn ensure_schema(db: &DB) -> Result<()> {
 }
 
 fn migrate(db: &DB, from: u32, to: u32) -> Result<()> {
-    // v1 is the first schema — no intermediate migrations yet.
-    if from == 0 || from == to {
+    // v1 → v2: AccountRecord gained `tokens`/`xp`. Stored JSON is left as-is; missing
+    // fields deserialize with safe defaults. Only the schema marker is updated.
+    if from == 0 || from == to || (from == 1 && to == 2) {
         db.put(KEY_META_SCHEMA, to.to_be_bytes())
             .map_err(|e| PlatariumError::State(format!("write schema: {}", e)))?;
         return Ok(());
@@ -44,4 +45,27 @@ fn migrate(db: &DB, from: u32, to: u32) -> Result<()> {
         "unsupported schema migration {} -> {}",
         from, to
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rocksdb::Options;
+    use tempfile::TempDir;
+
+    #[test]
+    fn migrate_v1_to_v2_bumps_meta_schema() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("db");
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        let db = DB::open(&opts, &path).unwrap();
+        db.put(KEY_META_SCHEMA, 1u32.to_be_bytes()).unwrap();
+        ensure_schema(&db).unwrap();
+        let bytes = db.get(KEY_META_SCHEMA).unwrap().unwrap();
+        let mut arr = [0u8; 4];
+        arr.copy_from_slice(&bytes[..4]);
+        assert_eq!(u32::from_be_bytes(arr), SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 2);
+    }
 }

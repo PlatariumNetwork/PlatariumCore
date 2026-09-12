@@ -32,6 +32,8 @@ pub mod core_rpc;
 pub mod rpc_security;
 pub mod kernel;
 pub mod dag;
+pub mod finalize_contract;
+pub mod unsafe_flags_inventory;
 
 use crate::error::{PlatariumError, Result};
 use crate::core::transaction::Transaction;

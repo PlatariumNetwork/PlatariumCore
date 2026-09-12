@@ -1,6 +1,13 @@
-//! RocksDB key encoding (v1). Big-endian heights for lexicographic order.
+//! RocksDB key encoding. Big-endian heights for lexicographic order.
+//!
+//! # Schema versioning
+//! - **v1**: initial account values (`address`, `balance`, `uplp_balance`, `nonce`).
+//! - **v2**: `AccountRecord` gains `tokens` + `xp` (StateDiff / Tokens·Xp). Old v1 JSON
+//!   values still load via serde defaults (empty `tokens`, `xp = "0"`); migration only
+//!   bumps `meta/schema` — no account rewrite pass.
 
-pub const SCHEMA_VERSION: u32 = 1;
+/// Current on-disk schema marker (`meta/schema`). Bumped for Tokens/Xp account fields.
+pub const SCHEMA_VERSION: u32 = 2;
 
 pub const PREFIX_ACCOUNT: &[u8] = b"a/";
 pub const PREFIX_TX: &[u8] = b"t/";

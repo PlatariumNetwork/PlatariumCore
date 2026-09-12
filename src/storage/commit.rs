@@ -203,6 +203,7 @@ pub fn build_commit_batch(commit: &BlockCommit) -> Result<WriteBatch> {
 mod tests {
     use super::*;
     use crate::storage::query::{get_account, get_block, get_head, get_tx};
+    use crate::storage::schema::key_account;
     use tempfile::TempDir;
 
     fn sample_commit(height: u64) -> BlockCommit {
@@ -323,13 +324,33 @@ mod tests {
             round.tokens.get("Token:USDT").map(String::as_str),
             Some("42")
         );
+    }
 
-        // Legacy records without tokens/xp still deserialize.
-        let legacy: AccountRecord = serde_json::from_str(
-            r#"{"address":"PxB","balance":"1","uplp_balance":"0","nonce":0}"#,
-        )
-        .unwrap();
+    /// Issue #32: old-shape Rocks JSON without tokens/xp must load with defaults
+    /// and must not wipe balance/nonce.
+    #[test]
+    fn legacy_account_record_deserializes_preserving_balance_nonce() {
+        const LEGACY: &str =
+            r#"{"address":"PxLegacy","balance":"9876543210","uplp_balance":"42","nonce":7}"#;
+        let legacy: AccountRecord = serde_json::from_str(LEGACY).unwrap();
+        assert_eq!(legacy.address, "PxLegacy");
+        assert_eq!(legacy.balance, "9876543210");
+        assert_eq!(legacy.uplp_balance, "42");
+        assert_eq!(legacy.nonce, 7);
         assert!(legacy.tokens.is_empty());
         assert_eq!(legacy.xp, "0");
+
+        // Round-trip through Rocks get path: put raw legacy bytes, read back.
+        let dir = TempDir::new().unwrap();
+        let store = RocksStore::open(dir.path().join("db")).unwrap();
+        store
+            .put(&key_account("PxLegacy"), LEGACY.as_bytes())
+            .unwrap();
+        let loaded = get_account(&store, "PxLegacy").unwrap().unwrap();
+        assert_eq!(loaded.balance, "9876543210");
+        assert_eq!(loaded.uplp_balance, "42");
+        assert_eq!(loaded.nonce, 7);
+        assert!(loaded.tokens.is_empty());
+        assert_eq!(loaded.xp, "0");
     }
 }
