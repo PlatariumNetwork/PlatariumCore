@@ -188,6 +188,19 @@ pub use core::dag::{
     vertex_from_params, AuthorId, CommitteeConfig, CommitOutcome, DagStore, DagVertex, IngestResult,
     IngestStatus, LinearizeResult, OrderDigestsResult, PendingQueue, VertexId, SHARED_GENESIS_AUTHOR,
 };
+pub use core::consistency::{
+    check_consistency, check_consistency_json, check_consistency_store, ConsistencyReport,
+};
+pub use core::failpoints::{
+    arm as failpoint_arm, clear as failpoint_clear, clear_all as failpoint_clear_all, hit as failpoint_hit,
+    is_armed as failpoint_is_armed, FP_FINALIZE_BEFORE_PERSIST, FP_JSON_STAGING_COMMIT,
+    FP_ROCKS_COMMIT_ATOMIC, FP_ROCKS_WRITE_BATCH,
+};
+pub use core::finalize_contract::{
+    decide_finalize_tip, finalize_prepare_execute_validate, finalize_to_storage,
+    finalize_to_storage_with_tip, validate_state_diff_for_persist, FinalizePhase, FinalizeTip,
+    FinalizeValidateResult, TipDecision, FINALIZE_CONTRACT_DOC, ROCKS_CANONICAL_JSON_STAGING_DECISION,
+};
 pub use storage::{
     AccountRecord, BlockCommit, BlockRecordStored, ReceiptRecord, RocksStore, SNAPSHOT_INTERVAL,
     SnapshotMeta, SCHEMA_VERSION, account_record_to_query_json, account_rmw_preserve_tokens_xp,

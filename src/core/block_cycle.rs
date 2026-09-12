@@ -223,6 +223,7 @@ pub fn block_cycle_json(params: &Value) -> Result<String> {
 mod tests {
     use super::*;
     use crate::core::asset::Asset;
+    use crate::core::runtime_gates::GATE_ENV_LOCK;
     use crate::core::state_file::init_state_file;
     use crate::core::transaction::Transaction;
     use std::collections::HashSet;
@@ -230,6 +231,7 @@ mod tests {
 
     #[test]
     fn block_cycle_empty_mempool() {
+        let _g = GATE_ENV_LOCK.lock().unwrap();
         std::env::remove_var("PLATARIUM_CORE_MULTI_NODE");
         let dir = TempDir::new().unwrap();
         let state = dir.path().join("state.json");
@@ -251,6 +253,7 @@ mod tests {
 
     #[test]
     fn block_cycle_rejects_multi_node_auto_confirm() {
+        let _g = GATE_ENV_LOCK.lock().unwrap();
         std::env::set_var("PLATARIUM_CORE_MULTI_NODE", "1");
         let dir = TempDir::new().unwrap();
         let state = dir.path().join("state.json");
@@ -275,6 +278,7 @@ mod tests {
 
     #[test]
     fn block_cycle_selects_and_assembles() {
+        let _g = GATE_ENV_LOCK.lock().unwrap();
         std::env::remove_var("PLATARIUM_CORE_MULTI_NODE");
         let dir = TempDir::new().unwrap();
         let state_path = dir.path().join("state.json");

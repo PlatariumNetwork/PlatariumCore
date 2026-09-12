@@ -42,6 +42,7 @@ const READ_METHODS: &[&str] = &[
     "verify_signature",
     "normalize_signature",
     "validate_mnemonic",
+    "check_consistency",
 ];
 
 /// Destructive Rocks storage-admin methods (R2-H1 / R2-M2).

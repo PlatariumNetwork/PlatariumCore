@@ -53,6 +53,7 @@ impl RocksStore {
     }
 
     pub fn write_batch(&self, batch: WriteBatch) -> Result<()> {
+        crate::core::failpoints::hit(crate::core::failpoints::FP_ROCKS_WRITE_BATCH)?;
         self.db
             .write(batch)
             .map_err(|e| PlatariumError::State(format!("rocksdb write_batch: {}", e)))

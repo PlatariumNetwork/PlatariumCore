@@ -132,12 +132,14 @@ pub const MELANCHOLY_MULTI_NODE_DEFAULTS_DOC: &str = concat!(
     "solo/dev exceptions default-off (require explicit flag when multi-node unset)"
 );
 
+/// Serializes tests that mutate Core gate env vars (issue #53 / runtime_gates).
+#[cfg(test)]
+pub(crate) static GATE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use super::GATE_ENV_LOCK as ENV_LOCK;
 
     fn clear_gate_env() {
         std::env::remove_var("PLATARIUM_CORE_MULTI_NODE");
@@ -229,5 +231,48 @@ mod tests {
         assert!(MELANCHOLY_MULTI_NODE_DEFAULTS_DOC.contains("default-off"));
         assert!(MELANCHOLY_MULTI_NODE_DEFAULTS_DOC.contains("ALLOW_REMOTE_SIGN"));
         assert!(MELANCHOLY_MULTI_NODE_DEFAULTS_DOC.contains("DAG_ALLOW_UNSIGNED"));
+    }
+
+    /// Issue #53: Core entrypoints fail-closed for unsafe combos without Gateway discipline.
+    #[test]
+    fn unsafe_core_modes_fail_closed_without_gateway() {
+        use crate::core::consensus_cli::l1_process_votes_json;
+        use crate::core::block_cycle::block_cycle_json;
+        use crate::core::state_file::init_state_file;
+        use serde_json::json;
+        use tempfile::TempDir;
+
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_gate_env();
+
+        // Path 1: auto_confirm + multi-node via block_cycle (Core-owned).
+        std::env::set_var("PLATARIUM_CORE_MULTI_NODE", "1");
+        let dir = TempDir::new().unwrap();
+        let state = dir.path().join("state.json");
+        init_state_file(&state).unwrap();
+        let err = block_cycle_json(&json!({
+            "state_file": state.to_string_lossy(),
+            "mempool_txs": "[]",
+            "block_number": 1u64,
+            "previous_hash": "0",
+            "timestamp": 1i64,
+            "producer_id": "n0",
+            "auto_confirm": true,
+            "apply_txs": false,
+        }))
+        .expect_err("must not silently accept multi-node auto_confirm");
+        assert!(
+            err.to_string().contains("multi-node") && err.to_string().contains("auto_confirm"),
+            "{err}"
+        );
+
+        // Path 2: unsigned L1 vote tallies refused under multi-node (no Gateway).
+        let err = l1_process_votes_json(r#"[{"node_id":"v1","yes":true}]"#)
+            .expect_err("must not silently accept unsigned votes in multi-node");
+        assert!(
+            err.to_string().contains("multi-node") || err.to_string().contains("unsigned"),
+            "{err}"
+        );
+        clear_gate_env();
     }
 }

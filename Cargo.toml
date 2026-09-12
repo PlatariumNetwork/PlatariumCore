@@ -50,6 +50,11 @@ clap = { version = "4.5", features = ["derive"] }
 # Canonical chain storage (native C++ via librocksdb-sys; first build is slow)
 rocksdb = "0.22"
 
+[features]
+default = []
+# Enable named finalize failpoints outside of `cfg(test)` (issue #54). No-op when unused.
+failpoints = []
+
 [dev-dependencies]
 tempfile = "3"
 

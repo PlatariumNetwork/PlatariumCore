@@ -208,10 +208,18 @@ impl StorageEngine for StateFileStorageEngine {
         if !self.begun {
             return Err(PlatariumError::State("StorageEngine.begin not called".into()));
         }
-        save_state_file(&self.path, &self.state)?;
-        self.begun = false;
-        self.snapshot_before = None;
-        Ok(())
+        crate::core::failpoints::hit(crate::core::failpoints::FP_JSON_STAGING_COMMIT)?;
+        match save_state_file(&self.path, &self.state) {
+            Ok(()) => {
+                self.begun = false;
+                self.snapshot_before = None;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.rollback();
+                Err(e)
+            }
+        }
     }
 
     fn rollback(&mut self) -> Result<()> {
@@ -291,6 +299,11 @@ impl StorageEngine for RocksAccountStorageEngine {
         if !self.begun {
             return Err(PlatariumError::State("StorageEngine.begin not called".into()));
         }
+        if let Err(e) = crate::core::failpoints::hit(crate::core::failpoints::FP_ROCKS_COMMIT_ATOMIC)
+        {
+            let _ = self.rollback();
+            return Err(e);
+        }
         let store = open_cached(&self.db_path)?;
         let mut batch = rocksdb::WriteBatch::default();
         for a in &self.staging {
@@ -333,7 +346,10 @@ impl StorageEngine for RocksAccountStorageEngine {
                 .map_err(|e| PlatariumError::State(format!("encode meta/escrows: {}", e)))?;
             batch.put(KEY_META_ESCROWS, meta);
         }
-        store.write_batch(batch)?;
+        if let Err(e) = store.write_batch(batch) {
+            let _ = self.rollback();
+            return Err(e);
+        }
         self.staging.clear();
         self.staging_escrows = None;
         self.begun = false;

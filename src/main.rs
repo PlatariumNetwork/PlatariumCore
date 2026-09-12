@@ -240,6 +240,11 @@ enum Commands {
         mempool_txs: String,
     },
 
+    /// RocksDB: diagnostic consistency check (read-only; does not mutate)
+    CheckConsistency {
+        #[arg(long)]
+        db_path: String,
+    },
     /// RocksDB: get chain head height
     RocksGetHead {
         #[arg(long)]
@@ -428,6 +433,7 @@ fn main() {
             state_file,
             mempool_txs,
         } => handle_select_block_txs(state_file, mempool_txs),
+        Commands::CheckConsistency { db_path } => handle_check_consistency(db_path),
         Commands::RocksGetHead { db_path } => handle_rocks_get_head(db_path),
         Commands::RocksGetTx { db_path, tx_hash } => handle_rocks_get_tx(db_path, tx_hash),
         Commands::RocksGetBlock { db_path, height } => handle_rocks_get_block(db_path, height),
@@ -826,6 +832,11 @@ fn handle_min_fee_from_load(pending_count: usize) -> std::result::Result<(), Box
 
 fn handle_rocks_get_head(db_path: String) -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("{}", rocks_get_head_json(&db_path)?);
+    Ok(())
+}
+
+fn handle_check_consistency(db_path: String) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    println!("{}", platarium_core::check_consistency_json(&db_path)?);
     Ok(())
 }
 

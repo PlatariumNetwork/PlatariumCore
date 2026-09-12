@@ -47,13 +47,18 @@ pub fn commit_state_diff(storage: &mut dyn StorageEngine, diff: &StateDiff) -> R
             });
         }
     }
-    storage.commit_atomic()?;
-    Ok(CommitResult {
-        ok: true,
-        post_state_root: diff.post_state_root.clone(),
-        height: 0,
-        error: None,
-    })
+    match storage.commit_atomic() {
+        Ok(()) => Ok(CommitResult {
+            ok: true,
+            post_state_root: diff.post_state_root.clone(),
+            height: 0,
+            error: None,
+        }),
+        Err(e) => {
+            let _ = storage.rollback();
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]

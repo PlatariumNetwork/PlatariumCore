@@ -820,6 +820,10 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
             let path = param_str(params, "state_file")?;
             state_root_json(Path::new(&path))
         }
+        "check_consistency" => {
+            let db_path = param_str(params, "db_path")?;
+            crate::core::consistency::check_consistency_json(&db_path)
+        }
 
         "validate_tx" => {
             let tx = param_str(params, "tx")?;

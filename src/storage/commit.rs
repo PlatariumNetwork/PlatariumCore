@@ -156,6 +156,18 @@ pub fn commit_block(store: &RocksStore, commit: &BlockCommit) -> Result<()> {
 
     let height = commit.block.height;
     let current_head = store.head_height()?;
+    // Issue #46: duplicate finalize of the same tip is idempotent; conflicting overwrite rejected.
+    if height == current_head && current_head > 0 {
+        if let Some(existing) = crate::storage::query::get_block(store, height)? {
+            if existing == commit.block && commit.state_root == existing.state_root {
+                return Ok(());
+            }
+            return Err(PlatariumError::State(format!(
+                "conflict: height {} already committed with different block (canonical unchanged)",
+                height
+            )));
+        }
+    }
     let expected = if current_head == 0 { 1 } else { current_head + 1 };
     if height != expected {
         return Err(PlatariumError::State(format!(
@@ -318,6 +330,37 @@ mod tests {
         let a = get_account(&store, "PxA").unwrap().unwrap();
         assert_eq!(a.balance, "90");
         assert_eq!(a.nonce, 1);
+    }
+
+    /// Issue #46: duplicate commit_block is idempotent; conflicting block rejected.
+    #[test]
+    fn duplicate_commit_idempotent_conflict_rejects() {
+        let dir = TempDir::new().unwrap();
+        let store = RocksStore::open(dir.path().join("db")).unwrap();
+        let c1 = sample_commit(1);
+        commit_block(&store, &c1).unwrap();
+        assert_eq!(get_head(&store).unwrap(), 1);
+        // Duplicate identical tip → safe/idempotent.
+        commit_block(&store, &c1).unwrap();
+        assert_eq!(get_head(&store).unwrap(), 1);
+        let a = get_account(&store, "PxA").unwrap().unwrap();
+        assert_eq!(a.balance, "90");
+
+        let mut conflict = sample_commit(1);
+        conflict.block.block_hash = "other-hash".into();
+        conflict.block.state_root = "other-root".into();
+        conflict.state_root = "other-root".into();
+        let err = commit_block(&store, &conflict).unwrap_err();
+        assert!(
+            err.to_string().contains("conflict") && err.to_string().contains("canonical unchanged"),
+            "{err}"
+        );
+        assert_eq!(get_head(&store).unwrap(), 1);
+        let block = get_block(&store, 1).unwrap().unwrap();
+        assert_eq!(block.block_hash, "bh1");
+        assert_eq!(block.state_root, "root1");
+        let a = get_account(&store, "PxA").unwrap().unwrap();
+        assert_eq!(a.balance, "90");
     }
 
     #[test]
