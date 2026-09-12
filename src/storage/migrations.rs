@@ -2,10 +2,36 @@
 //!
 //! Real entrypoints: read/write schema marker on open, and stepwise
 //! `migrate(from → to)` (including `vN-1 → vN`) — not a one-off hack.
+//!
+//! # Plugging future XP / assets / staking / account metadata (issue #77)
+//!
+//! Register new durable account fields through this harness — do not invent a
+//! one-off open-path rewrite. Extension steps:
+//!
+//! 1. Bump [`SCHEMA_VERSION`] in [`crate::storage::schema`] (N → N+1).
+//! 2. Add the field on [`AccountRecord`](crate::storage::commit::AccountRecord)
+//!    with `#[serde(default)]` (and safe defaults) so old JSON still loads.
+//! 3. Add a `migrate_one_step(N → N+1)` arm below: marker-only when serde
+//!    defaults suffice, or a rewrite pass when values must be backfilled
+//!    (XP maps, asset catalogs, staking balances, account metadata).
+//! 4. Wire StateDiff / query / RPC helpers so new fields survive RMW and
+//!    always surface (including empty) without panic.
+//! 5. Add an old-schema fixture test: open vN DB → [`ensure_schema`] /
+//!    [`migrate`] → current [`SCHEMA_VERSION`].
+//!
+//! Current marker: see [`SCHEMA_VERSION`]. v1→v2 covered Tokens·Xp; future
+//! staking / extra XP / asset metadata fields follow the same steps.
 
 use crate::error::{PlatariumError, Result};
 use crate::storage::schema::{KEY_META_SCHEMA, SCHEMA_VERSION};
 use rocksdb::DB;
+
+/// Discoverable note that future XP/assets/staking fields register via
+/// [`SCHEMA_VERSION`] + `migrate_one_step` (issue #77).
+pub const MIGRATION_EXTENSION_DOC: &str = concat!(
+    "bump SCHEMA_VERSION; serde defaults on AccountRecord; ",
+    "migrate_one_step N→N+1; StateDiff/query/RPC surface; old-schema fixture"
+);
 
 /// Read on-disk schema version from `meta/schema`. `None` if unset (fresh DB).
 pub fn read_schema_version(db: &DB) -> Result<Option<u32>> {
@@ -99,6 +125,10 @@ fn migrate_one_step(db: &DB, from: u32, to: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::commit::AccountRecord;
+    use crate::storage::query::get_account;
+    use crate::storage::rocks::RocksStore;
+    use crate::storage::schema::key_account;
     use rocksdb::Options;
     use tempfile::TempDir;
 
@@ -132,5 +162,60 @@ mod tests {
         write_schema_version(&db, 1).unwrap();
         migrate(&db, 1, SCHEMA_VERSION).unwrap();
         assert_eq!(read_schema_version(&db).unwrap(), Some(SCHEMA_VERSION));
+    }
+
+    /// Issue #75: old-schema fixture DB → migration on open → current schema; no panic.
+    #[test]
+    fn old_fixture_migrates_to_current_schema() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("old_fixture_db");
+
+        // Build a v1-shaped fixture without going through RocksStore::open (which
+        // would immediately bump schema). Legacy account JSON omits tokens/xp.
+        const LEGACY_ACCOUNT: &str = concat!(
+            r#"{"address":"PxOldFixture","balance":"12345","uplp_balance":"9","nonce":3}"#
+        );
+        {
+            let mut opts = Options::default();
+            opts.create_if_missing(true);
+            let db = DB::open(&opts, &path).unwrap();
+            write_schema_version(&db, 1).unwrap();
+            db.put(key_account("PxOldFixture"), LEGACY_ACCOUNT.as_bytes())
+                .unwrap();
+            assert_eq!(read_schema_version(&db).unwrap(), Some(1));
+        }
+
+        // Reopen via RocksStore — ensure_schema must migrate without panic.
+        let store = RocksStore::open(&path).expect("old fixture must open after migration");
+        assert_eq!(
+            read_schema_version(store.db()).unwrap(),
+            Some(SCHEMA_VERSION),
+            "migrated fixture must report current SCHEMA_VERSION"
+        );
+
+        let loaded = get_account(&store, "PxOldFixture")
+            .expect("get_account must not fail")
+            .expect("legacy account must still be present");
+        assert_eq!(loaded.address, "PxOldFixture");
+        assert_eq!(loaded.balance, "12345");
+        assert_eq!(loaded.uplp_balance, "9");
+        assert_eq!(loaded.nonce, 3);
+        assert!(loaded.tokens.is_empty());
+        assert_eq!(loaded.xp, "0");
+
+        // Serde path also stays panic-free on the raw fixture bytes.
+        let parsed: AccountRecord = serde_json::from_str(LEGACY_ACCOUNT).unwrap();
+        assert_eq!(parsed.xp, "0");
+    }
+
+    /// Issue #77: extension doc lists steps and references SCHEMA_VERSION.
+    #[test]
+    fn migration_extension_doc_references_schema_version() {
+        assert!(MIGRATION_EXTENSION_DOC.contains("SCHEMA_VERSION"));
+        assert!(MIGRATION_EXTENSION_DOC.contains("migrate_one_step"));
+        assert!(SCHEMA_VERSION >= 2);
+        // Module rustdoc is the canonical short doc; constant mirrors the steps.
+        assert!(MIGRATION_EXTENSION_DOC.contains("serde defaults"));
+        assert!(MIGRATION_EXTENSION_DOC.contains("old-schema fixture"));
     }
 }

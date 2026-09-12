@@ -30,7 +30,7 @@ pub use query::{
 pub use rocks::{RocksStore, open_store};
 pub use schema::SCHEMA_VERSION;
 pub use migrations::{
-    ensure_schema, migrate, read_schema_version, write_schema_version,
+    ensure_schema, migrate, read_schema_version, write_schema_version, MIGRATION_EXTENSION_DOC,
 };
 pub use snapshot::{
     SNAPSHOT_INTERVAL, SnapshotMeta, bootstrap_from_snapshot, create_snapshot_if_due, list_snapshots,

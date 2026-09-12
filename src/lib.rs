@@ -205,6 +205,9 @@ pub use core::replay::{
     replay_blocks_from_state0, ReplayTip,
 };
 pub use core::protocol_notes::{NOW_UNIX_IS_WALL_CLOCK, THREE_CLOCK_SPLIT_DOC};
+pub use core::protocol_invariants::{
+    PROTOCOL_INVARIANTS_DOC, PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS,
+};
 pub use core::failpoints::{
     arm as failpoint_arm, clear as failpoint_clear, clear_all as failpoint_clear_all, hit as failpoint_hit,
     is_armed as failpoint_is_armed, FP_AFTER_ROCKS_WRITE, FP_AFTER_STATE_WRITE, FP_BEFORE_COMMIT,
@@ -226,5 +229,6 @@ pub use storage::{
     rocks_get_account_json, rocks_get_block_json, rocks_get_head_json, rocks_get_receipt_json,
     rocks_get_snapshot_json, rocks_get_state_root_json, rocks_get_tx_json,
     rocks_list_address_txs_json, rocks_list_snapshots_json, write_schema_version,
+    MIGRATION_EXTENSION_DOC,
     InMemoryStorageEngine, RocksAccountStorageEngine, StateFileStorageEngine, StorageEngine,
 };

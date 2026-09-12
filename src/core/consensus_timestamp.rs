@@ -87,4 +87,51 @@ mod tests {
         assert!(validate_consensus_timestamp(100, 100, 100).is_err());
         assert!(validate_consensus_timestamp(100 + MAX_DRIFT + 1, 0, 100).is_err());
     }
+
+    /// Issue #73: accept at monotonic + drift boundaries; reject just beyond drift
+    /// and equal/older previous timestamps.
+    #[test]
+    fn timestamp_boundary_accept_and_reject() {
+        let previous = 1_000_000i64;
+        let local = previous + 10;
+
+        // Accept at monotonic boundary: timestamp = previous + 1 (strictly greater).
+        assert!(
+            validate_consensus_timestamp(previous + 1, previous, local).is_ok(),
+            "monotonic boundary (previous+1) must accept when within drift"
+        );
+
+        // Accept at drift boundary: timestamp = local_time + MAX_DRIFT.
+        let at_drift_boundary = local + MAX_DRIFT;
+        assert!(
+            at_drift_boundary > previous,
+            "drift-boundary timestamp must still be monotonic vs previous"
+        );
+        assert!(
+            validate_consensus_timestamp(at_drift_boundary, previous, local).is_ok(),
+            "timestamp == local + MAX_DRIFT must accept"
+        );
+
+        // Reject just beyond drift: timestamp = local_time + MAX_DRIFT + 1.
+        let beyond_drift = local + MAX_DRIFT + 1;
+        let err = validate_consensus_timestamp(beyond_drift, previous, local).unwrap_err();
+        assert!(
+            err.to_string().contains("MAX_DRIFT"),
+            "just beyond drift must reject: {err}"
+        );
+
+        // Reject equal previous.
+        let err = validate_consensus_timestamp(previous, previous, local).unwrap_err();
+        assert!(
+            err.to_string().contains("non-monotonic"),
+            "equal previous must reject: {err}"
+        );
+
+        // Reject older previous.
+        let err = validate_consensus_timestamp(previous - 1, previous, local).unwrap_err();
+        assert!(
+            err.to_string().contains("non-monotonic"),
+            "older previous must reject: {err}"
+        );
+    }
 }

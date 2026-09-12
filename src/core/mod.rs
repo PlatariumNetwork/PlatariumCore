@@ -39,6 +39,7 @@ pub mod consistency;
 pub mod replay;
 pub mod consensus_timestamp;
 pub mod protocol_notes;
+pub mod protocol_invariants;
 pub mod unsafe_flags_inventory;
 pub mod runtime_gates;
 
