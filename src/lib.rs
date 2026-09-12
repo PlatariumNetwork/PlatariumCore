@@ -190,12 +190,12 @@ pub use core::dag::{
 };
 pub use storage::{
     AccountRecord, BlockCommit, BlockRecordStored, ReceiptRecord, RocksStore, SNAPSHOT_INTERVAL,
-    SnapshotMeta, SCHEMA_VERSION, bootstrap_from_snapshot, build_commit_batch, commit_block,
-    create_snapshot_if_due, get_account, get_block, get_head, get_receipt, get_state_root, get_tx,
-    list_snapshots, list_tx_hashes_for_address, migrate_json_to_rocks, open_store,
-    rocks_bootstrap_snapshot_json, rocks_commit_block_json, rocks_get_account_json,
-    rocks_get_block_json, rocks_get_head_json, rocks_get_receipt_json, rocks_get_snapshot_json,
-    rocks_get_state_root_json, rocks_get_tx_json, rocks_list_address_txs_json,
-    rocks_list_snapshots_json, InMemoryStorageEngine, RocksAccountStorageEngine,
-    StateFileStorageEngine, StorageEngine,
+    SnapshotMeta, SCHEMA_VERSION, account_record_to_query_json, account_rmw_preserve_tokens_xp,
+    bootstrap_from_snapshot, build_commit_batch, commit_block, create_snapshot_if_due, get_account,
+    get_block, get_head, get_receipt, get_state_root, get_tx, list_snapshots,
+    list_tx_hashes_for_address, migrate_json_to_rocks, open_store, rocks_bootstrap_snapshot_json,
+    rocks_commit_block_json, rocks_get_account_json, rocks_get_block_json, rocks_get_head_json,
+    rocks_get_receipt_json, rocks_get_snapshot_json, rocks_get_state_root_json, rocks_get_tx_json,
+    rocks_list_address_txs_json, rocks_list_snapshots_json, InMemoryStorageEngine,
+    RocksAccountStorageEngine, StateFileStorageEngine, StorageEngine,
 };

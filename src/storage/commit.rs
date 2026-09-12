@@ -60,11 +60,54 @@ pub struct AccountRecord {
     pub uplp_balance: String,
     pub nonce: u64,
     /// Non-PLP token balances (canonical asset key → decimal string). Sorted via BTreeMap.
+    /// Omitted from Rocks write encoding when empty; query/RPC paths always expose via
+    /// [`account_record_to_query_json`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tokens: BTreeMap<String, String>,
     /// Contributor XP balance as decimal string (`Token:XP`, default `"0"`).
     #[serde(default = "default_xp")]
     pub xp: String,
+}
+
+/// Read-modify-write helper: update balance/μPLP/nonce while keeping durable tokens/xp.
+///
+/// Use when only non-token fields change so a naive rewrite cannot drop Tokens·Xp.
+pub fn account_rmw_preserve_tokens_xp(
+    existing: &AccountRecord,
+    balance: String,
+    uplp_balance: String,
+    nonce: u64,
+) -> AccountRecord {
+    AccountRecord {
+        address: existing.address.clone(),
+        balance,
+        uplp_balance,
+        nonce,
+        tokens: existing.tokens.clone(),
+        xp: if existing.xp.is_empty() {
+            "0".into()
+        } else {
+            existing.xp.clone()
+        },
+    }
+}
+
+/// Query/RPC JSON for an account: always includes `tokens` (object) and `xp` (string).
+/// Empty maps and empty/`"0"` xp must not panic or omit the fields.
+pub fn account_record_to_query_json(account: &AccountRecord) -> serde_json::Value {
+    let xp = if account.xp.is_empty() {
+        "0"
+    } else {
+        account.xp.as_str()
+    };
+    serde_json::json!({
+        "address": account.address,
+        "balance": account.balance,
+        "uplp_balance": account.uplp_balance,
+        "nonce": account.nonce,
+        "tokens": account.tokens,
+        "xp": xp,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -324,6 +367,72 @@ mod tests {
             round.tokens.get("Token:USDT").map(String::as_str),
             Some("42")
         );
+    }
+
+    /// Issue #35: balance-only RMW must retain prior tokens/xp.
+    #[test]
+    fn rmw_preserves_tokens_and_xp_on_balance_update() {
+        let mut tokens = BTreeMap::new();
+        tokens.insert("Token:XP".into(), "250".into());
+        tokens.insert("Token:USDT".into(), "99".into());
+        let existing = AccountRecord {
+            address: "PxRmw".into(),
+            balance: "1000".into(),
+            uplp_balance: "10".into(),
+            nonce: 3,
+            tokens: tokens.clone(),
+            xp: "250".into(),
+        };
+        let updated = account_rmw_preserve_tokens_xp(&existing, "900".into(), "9".into(), 4);
+        assert_eq!(updated.balance, "900");
+        assert_eq!(updated.uplp_balance, "9");
+        assert_eq!(updated.nonce, 4);
+        assert_eq!(updated.tokens, tokens);
+        assert_eq!(updated.xp, "250");
+        assert_eq!(updated.address, "PxRmw");
+    }
+
+    /// Issue #36: query JSON always surfaces tokens/xp, including empties.
+    #[test]
+    fn query_json_exposes_empty_tokens_and_xp_without_panic() {
+        let empty = AccountRecord {
+            address: "PxEmpty".into(),
+            balance: "0".into(),
+            uplp_balance: "0".into(),
+            nonce: 0,
+            tokens: BTreeMap::new(),
+            xp: String::new(),
+        };
+        let v = account_record_to_query_json(&empty);
+        assert!(v.get("tokens").unwrap().is_object());
+        assert_eq!(v["tokens"], serde_json::json!({}));
+        assert_eq!(v["xp"], "0");
+
+        let dir = TempDir::new().unwrap();
+        let store = RocksStore::open(dir.path().join("db")).unwrap();
+        // Empty tokens omitted in Rocks encoding; query helper still surfaces fields.
+        let with_tok = AccountRecord {
+            address: "PxQ".into(),
+            balance: "1".into(),
+            uplp_balance: "0".into(),
+            nonce: 0,
+            tokens: {
+                let mut t = BTreeMap::new();
+                t.insert("Token:XP".into(), "7".into());
+                t
+            },
+            xp: "7".into(),
+        };
+        store
+            .put(
+                &key_account("PxQ"),
+                &serde_json::to_vec(&with_tok).unwrap(),
+            )
+            .unwrap();
+        let loaded = get_account(&store, "PxQ").unwrap().unwrap();
+        let q = account_record_to_query_json(&loaded);
+        assert_eq!(q["xp"], "7");
+        assert_eq!(q["tokens"]["Token:XP"], "7");
     }
 
     /// Issue #32: old-shape Rocks JSON without tokens/xp must load with defaults

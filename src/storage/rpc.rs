@@ -37,7 +37,12 @@ pub fn rocks_get_block_json(db_path: &str, height: u64) -> Result<String> {
 pub fn rocks_get_account_json(db_path: &str, address: &str) -> Result<String> {
     let store = open_cached(db_path)?;
     match get_account(store.as_ref(), address)? {
-        Some(a) => Ok(serde_json::to_string(&serde_json::json!({"found": true, "account": a})).unwrap()),
+        Some(a) => {
+            // Issue #36: always expose tokens/xp (including empty) on query/RPC.
+            let account = crate::storage::commit::account_record_to_query_json(&a);
+            Ok(serde_json::to_string(&serde_json::json!({"found": true, "account": account}))
+                .unwrap())
+        }
         None => Ok(serde_json::json!({"found": false}).to_string()),
     }
 }

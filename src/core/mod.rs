@@ -34,6 +34,7 @@ pub mod kernel;
 pub mod dag;
 pub mod finalize_contract;
 pub mod unsafe_flags_inventory;
+pub mod runtime_gates;
 
 use crate::error::{PlatariumError, Result};
 use crate::core::transaction::Transaction;

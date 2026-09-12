@@ -59,6 +59,8 @@ pub fn block_cycle_json(params: &Value) -> Result<String> {
         .get("auto_confirm")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // Issue #48: multi-node + auto_confirm is a config error (solo path still allowed).
+    crate::core::runtime_gates::assert_auto_confirm_config(auto_confirm)?;
     let apply_txs = params
         .get("apply_txs")
         .and_then(|v| v.as_bool())
@@ -228,6 +230,7 @@ mod tests {
 
     #[test]
     fn block_cycle_empty_mempool() {
+        std::env::remove_var("PLATARIUM_CORE_MULTI_NODE");
         let dir = TempDir::new().unwrap();
         let state = dir.path().join("state.json");
         init_state_file(&state).unwrap();
@@ -247,7 +250,32 @@ mod tests {
     }
 
     #[test]
+    fn block_cycle_rejects_multi_node_auto_confirm() {
+        std::env::set_var("PLATARIUM_CORE_MULTI_NODE", "1");
+        let dir = TempDir::new().unwrap();
+        let state = dir.path().join("state.json");
+        init_state_file(&state).unwrap();
+        let params = json!({
+            "state_file": state.to_string_lossy(),
+            "mempool_txs": "[]",
+            "block_number": 1,
+            "previous_hash": "0",
+            "timestamp": 1,
+            "producer_id": "node0",
+            "auto_confirm": true,
+            "apply_txs": false,
+        });
+        let err = block_cycle_json(&params).unwrap_err();
+        assert!(
+            err.to_string().contains("multi-node") || err.to_string().contains("auto_confirm"),
+            "{err}"
+        );
+        std::env::remove_var("PLATARIUM_CORE_MULTI_NODE");
+    }
+
+    #[test]
     fn block_cycle_selects_and_assembles() {
+        std::env::remove_var("PLATARIUM_CORE_MULTI_NODE");
         let dir = TempDir::new().unwrap();
         let state_path = dir.path().join("state.json");
         init_state_file(&state_path).unwrap();

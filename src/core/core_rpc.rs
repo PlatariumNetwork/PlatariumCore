@@ -306,9 +306,8 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
         }
 
         "kernel_apply_batch" => {
-            use crate::core::kernel::{
-                commit_state_diff, execute_ordered_batch, ExecuteOptions, OrderedBatch,
-            };
+            use crate::core::finalize_contract::finalize_prepare_execute_validate;
+            use crate::core::kernel::{commit_state_diff, ExecuteOptions, OrderedBatch};
             use crate::core::state_file::load_state_file;
             use crate::core::transaction::Transaction;
             use crate::storage::engine::StateFileStorageEngine;
@@ -345,19 +344,69 @@ pub fn dispatch_rpc(method: &str, params: &Value) -> Result<String> {
             }
             let batch = OrderedBatch::new(batch_id, height, transactions)?;
             let state = load_state_file(Path::new(&path))?;
-            let out = execute_ordered_batch(
-                &state,
-                &batch,
-                ExecuteOptions { parallel },
-            )?;
             let live_root = state.snapshot().compute_state_root();
-            if out.diff.pre_state_root.as_ref() != Some(&live_root) {
+            // Issue #41: single prepare→execute→validate entry; invalid execute stops before persist.
+            let fin =
+                finalize_prepare_execute_validate(&state, &batch, ExecuteOptions { parallel })?;
+            if !fin.ok {
+                return Err(PlatariumError::State(
+                    fin.error
+                        .unwrap_or_else(|| "finalize prepare/execute/validate failed".into()),
+                ));
+            }
+            let diff = fin.diff.ok_or_else(|| {
+                PlatariumError::State("finalize missing diff after validate".into())
+            })?;
+            if diff.pre_state_root.as_ref() != Some(&live_root) {
                 return Err(PlatariumError::State(
                     "kernel_apply_batch pre_state_root mismatch".into(),
                 ));
             }
             let mut eng = StateFileStorageEngine::open(Path::new(&path))?;
-            let res = commit_state_diff(&mut eng, &out.diff)?;
+            let res = commit_state_diff(&mut eng, &diff)?;
+            Ok(serde_json::to_string(&res).map_err(|e| PlatariumError::State(e.to_string()))?)
+        }
+
+        "finalize_prepare_execute_validate" => {
+            use crate::core::finalize_contract::finalize_prepare_execute_validate;
+            use crate::core::kernel::{ExecuteOptions, OrderedBatch};
+            use crate::core::state_file::load_state_file;
+            use crate::core::transaction::Transaction;
+            let path = param_str(params, "state_file")?;
+            let parallel = param_bool(params, "parallel");
+            let batch_val = params
+                .get("batch")
+                .cloned()
+                .ok_or_else(|| PlatariumError::State("missing param batch".into()))?;
+            let batch_id = batch_val
+                .get("batch_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("batch")
+                .to_string();
+            let height = batch_val.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+            let txs_val = batch_val
+                .get("transactions")
+                .cloned()
+                .ok_or_else(|| PlatariumError::State("batch.transactions required".into()))?;
+            let mut transactions = Vec::new();
+            if let Some(arr) = txs_val.as_array() {
+                for item in arr {
+                    let tx = if let Some(s) = item.as_str() {
+                        Transaction::from_gateway_json(s)?
+                    } else {
+                        Transaction::from_gateway_json(&item.to_string())?
+                    };
+                    transactions.push(tx);
+                }
+            } else {
+                return Err(PlatariumError::State(
+                    "batch.transactions must be an array".into(),
+                ));
+            }
+            let batch = OrderedBatch::new(batch_id, height, transactions)?;
+            let state = load_state_file(Path::new(&path))?;
+            let res =
+                finalize_prepare_execute_validate(&state, &batch, ExecuteOptions { parallel })?;
             Ok(serde_json::to_string(&res).map_err(|e| PlatariumError::State(e.to_string()))?)
         }
 
@@ -1365,6 +1414,8 @@ fn serve_connection<S: std::io::Read + Write + Send + 'static>(stream: S) {
 
 /// Run JSON-RPC server on TCP `host:port` or Unix socket `unix:/path` (Unix only).
 pub fn run_serve(listen: &str) -> Result<()> {
+    // Issue #49: refuse serve when multi-node Melancholy + insecure RPC.
+    crate::core::runtime_gates::assert_serve_runtime_gates()?;
     if let Some(path) = listen.strip_prefix("unix:") {
         #[cfg(unix)]
         {

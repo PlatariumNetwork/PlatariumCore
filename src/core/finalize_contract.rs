@@ -14,6 +14,15 @@
 //! | 4 | **persist** | [`commit_state_diff`](crate::core::kernel::commit_state_diff) → `apply_accounts` / `apply_escrows` staged, then `commit_atomic` (Rocks `WriteBatch` or state-file replace). |
 //! | 5 | **COMMITTED** | Staging cleared; durable store reflects post-images; callers may treat `CommitResult.ok == true` as success. |
 //!
+//! ## Canonical store decision (not dual SoT, not 2PC)
+//!
+//! **RocksDB is the canonical tip/account store.** The JSON `state_file` is
+//! staging, recovery, and/or a local cache for CLI/dev flows — it is **not** a
+//! second source of truth alongside Rocks. Finalize is a single ordered path
+//! (PREPARE → execute → validate → persist → COMMITTED). Core does **not**
+//! implement a real two-phase commit across JSON and Rocks; failures before
+//! persist leave the prior committed tip unchanged.
+//!
 //! ## Failure → result table
 //!
 //! | Failure mode | Observable result | Durability |
@@ -26,16 +35,304 @@
 //! | **Duplicate** batch / replay of same post-images | Re-apply same absolute post-images | Same durable values (absolute replace, not delta) |
 //! | **Conflict** (touch-set / concurrent staging) | Scheduler / begin contract rejects or caller serializes | No cross-batch interleaving inside one engine begin/commit |
 //!
-//! Related entrypoints: `kernel_apply_batch` (RPC), `block_cycle` (optional Rocks commit after `apply_txs`).
+//! Related entrypoints: [`finalize_prepare_execute_validate`], `kernel_apply_batch` (RPC),
+//! `block_cycle` (optional Rocks commit after `apply_txs`).
+
+use crate::core::kernel::{
+    commit_state_diff, execute_ordered_batch, CommitResult, ExecuteOptions, ExecuteOutcome,
+    OrderedBatch, StateDiff, STATE_DIFF_SCHEMA_VERSION,
+};
+use crate::core::state::State;
+use crate::error::{PlatariumError, Result};
+use crate::storage::engine::StorageEngine;
+use serde::{Deserialize, Serialize};
 
 /// Marker so the finalize ADR module is linked and discoverable in rustdoc.
 pub const FINALIZE_CONTRACT_DOC: &str = "PREPARE → execute → validate → persist → COMMITTED";
 
+/// Stable label for the Rocks-canonical / JSON-staging decision (issue #40).
+pub const ROCKS_CANONICAL_JSON_STAGING_DECISION: &str =
+    "rocks_canonical_tip; json_state_file_staging_recovery_cache; not_dual_sot; not_real_2pc";
+
+/// Last phase completed by [`finalize_prepare_execute_validate`] / [`finalize_to_storage`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FinalizePhase {
+    Prepare,
+    Execute,
+    Validate,
+    Persist,
+    Committed,
+}
+
+/// Result of the prepare→execute→validate surface (persist optional).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FinalizeValidateResult {
+    pub ok: bool,
+    /// Furthest phase reached (validate on success of this entry; never persist here).
+    pub phase: FinalizePhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<StateDiff>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waves: Option<Vec<crate::core::kernel::ExecutionWave>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Always false for [`finalize_prepare_execute_validate`] (stops before persist).
+    pub persisted: bool,
+}
+
+/// Validate a StateDiff is safe to persist (schema + escrow JSON parse).
+pub fn validate_state_diff_for_persist(diff: &StateDiff) -> Result<()> {
+    if diff.schema_version != STATE_DIFF_SCHEMA_VERSION {
+        return Err(PlatariumError::State(format!(
+            "finalize validate: unsupported StateDiff schema {}",
+            diff.schema_version
+        )));
+    }
+    if let Some(ref escrows) = diff.escrows_json {
+        for js in escrows {
+            let _: crate::modules::escrow::Escrow = serde_json::from_str(js).map_err(|e| {
+                PlatariumError::State(format!("finalize validate: invalid escrow json: {}", e))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Single finalize entry: **PREPARE → execute → validate**, stopping before persist.
+///
+/// - PREPARE: `batch.validate()`
+/// - execute: [`execute_ordered_batch`]
+/// - validate: [`validate_state_diff_for_persist`]; any non-ok receipt aborts (`ok=false`,
+///   `persisted=false`) so callers never persist an invalid execute.
+pub fn finalize_prepare_execute_validate(
+    pre_state: &State,
+    batch: &OrderedBatch,
+    opts: ExecuteOptions,
+) -> Result<FinalizeValidateResult> {
+    // PREPARE
+    if let Err(e) = batch.validate() {
+        return Ok(FinalizeValidateResult {
+            ok: false,
+            phase: FinalizePhase::Prepare,
+            diff: None,
+            waves: None,
+            error: Some(e.to_string()),
+            persisted: false,
+        });
+    }
+
+    // execute
+    let outcome: ExecuteOutcome = match execute_ordered_batch(pre_state, batch, opts) {
+        Ok(o) => o,
+        Err(e) => {
+            return Ok(FinalizeValidateResult {
+                ok: false,
+                phase: FinalizePhase::Execute,
+                diff: None,
+                waves: None,
+                error: Some(e.to_string()),
+                persisted: false,
+            });
+        }
+    };
+
+    // Invalid execute (failed receipt) stops before persist.
+    if let Some(bad) = outcome
+        .diff
+        .receipts
+        .iter()
+        .find(|r| r.status != "ok")
+        .cloned()
+    {
+        return Ok(FinalizeValidateResult {
+            ok: false,
+            phase: FinalizePhase::Execute,
+            diff: Some(outcome.diff),
+            waves: Some(outcome.waves),
+            error: Some(
+                bad.error
+                    .unwrap_or_else(|| format!("tx {} status={}", bad.tx_hash, bad.status)),
+            ),
+            persisted: false,
+        });
+    }
+
+    // validate
+    if let Err(e) = validate_state_diff_for_persist(&outcome.diff) {
+        return Ok(FinalizeValidateResult {
+            ok: false,
+            phase: FinalizePhase::Validate,
+            diff: Some(outcome.diff),
+            waves: Some(outcome.waves),
+            error: Some(e.to_string()),
+            persisted: false,
+        });
+    }
+
+    Ok(FinalizeValidateResult {
+        ok: true,
+        phase: FinalizePhase::Validate,
+        diff: Some(outcome.diff),
+        waves: Some(outcome.waves),
+        error: None,
+        persisted: false,
+    })
+}
+
+/// Full finalize: prepare→execute→validate, then persist only when validate succeeded.
+pub fn finalize_to_storage(
+    pre_state: &State,
+    batch: &OrderedBatch,
+    opts: ExecuteOptions,
+    storage: &mut dyn StorageEngine,
+) -> Result<(FinalizeValidateResult, Option<CommitResult>)> {
+    let validated = finalize_prepare_execute_validate(pre_state, batch, opts)?;
+    if !validated.ok {
+        return Ok((validated, None));
+    }
+    let diff = validated
+        .diff
+        .as_ref()
+        .ok_or_else(|| PlatariumError::State("finalize: missing diff after validate".into()))?;
+    let commit = commit_state_diff(storage, diff)?;
+    let mut out = validated;
+    if commit.ok {
+        out.phase = FinalizePhase::Committed;
+        out.persisted = true;
+    } else {
+        out.ok = false;
+        out.phase = FinalizePhase::Persist;
+        out.persisted = false;
+        out.error = commit.error.clone();
+    }
+    Ok((out, Some(commit)))
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::core::asset::Asset;
+    use crate::core::kernel::OrderedBatch;
+    use crate::core::state::State;
+    use crate::core::transaction::Transaction;
+    use crate::generate_mnemonic;
+    use crate::signer::sign_with_both_keys;
+    use crate::signature::normalize_signature_hex;
+    use crate::storage::engine::InMemoryStorageEngine;
+    use serde::Serialize;
+    use std::collections::HashSet;
+
+    #[derive(Serialize)]
+    struct TxHashData {
+        from: String,
+        to: String,
+        asset: String,
+        amount: u128,
+        fee_uplp: u128,
+        nonce: u64,
+        reads: Vec<String>,
+        writes: Vec<String>,
+    }
+
+    fn wallet() -> (String, String, String) {
+        let (mnemonic, alpha) = generate_mnemonic().unwrap();
+        let from = crate::signer::signing_address_from_mnemonic(&mnemonic, &alpha).unwrap();
+        (mnemonic, alpha, from)
+    }
+
+    fn signed_tx(
+        mnemonic: &str,
+        alpha: &str,
+        from: &str,
+        to: &str,
+        amount: u128,
+        fee: u128,
+        nonce: u64,
+    ) -> Transaction {
+        let message = TxHashData {
+            from: from.into(),
+            to: to.into(),
+            asset: Asset::PLP.as_canonical(),
+            amount,
+            fee_uplp: fee,
+            nonce,
+            reads: vec![],
+            writes: vec![],
+        };
+        let sig = sign_with_both_keys(&message, mnemonic, alpha).unwrap();
+        Transaction {
+            hash: sig.hash,
+            from: from.into(),
+            to: to.into(),
+            asset: Asset::PLP,
+            amount,
+            fee_uplp: fee,
+            nonce,
+            reads: HashSet::new(),
+            writes: HashSet::new(),
+            sig_main: normalize_signature_hex(&sig.signatures[0].signature_compact),
+            sig_derived: normalize_signature_hex(&sig.signatures[1].signature_compact),
+            pub_main: Some(sig.signatures[0].pub_key.clone()),
+            pub_derived: Some(sig.signatures[1].pub_key.clone()),
+            tx_kind: None,
+            request_id_hash: None,
+            settle_outcome: None,
+            settle_outcome_key: None,
+            escrow_id: None,
+            purpose: None,
+            expires_at: None,
+            settle_payee: None,
+            settle_node: None,
+        }
+    }
+
     #[test]
     fn phases_marker_lists_contract() {
         assert!(super::FINALIZE_CONTRACT_DOC.contains("PREPARE"));
         assert!(super::FINALIZE_CONTRACT_DOC.contains("COMMITTED"));
+        assert!(super::ROCKS_CANONICAL_JSON_STAGING_DECISION.contains("rocks_canonical"));
+        assert!(super::ROCKS_CANONICAL_JSON_STAGING_DECISION.contains("not_real_2pc"));
+        assert!(!super::ROCKS_CANONICAL_JSON_STAGING_DECISION.contains("dual_sot_enabled"));
+    }
+
+    #[test]
+    fn prepare_execute_validate_does_not_persist() {
+        let (mn, alpha, alice) = wallet();
+        let bob = "PxBobFinalize000000000000000000000000000000000000000000000000001";
+        let state = State::new();
+        state.set_balance(&alice, 5000);
+        state.set_uplp_balance(&alice, 10);
+        state.set_nonce(&alice, 0);
+        let tx = signed_tx(&mn, &alpha, &alice, bob, 50, 1, 0);
+        let batch = OrderedBatch::new("f1".into(), 1, vec![tx]).unwrap();
+        let res =
+            finalize_prepare_execute_validate(&state, &batch, ExecuteOptions::default()).unwrap();
+        assert!(res.ok, "{:?}", res.error);
+        assert_eq!(res.phase, FinalizePhase::Validate);
+        assert!(!res.persisted);
+        assert!(res.diff.is_some());
+    }
+
+    #[test]
+    fn invalid_execute_stops_before_persist() {
+        let (mn, alpha, alice) = wallet();
+        let bob = "PxBobFinalizeFail0000000000000000000000000000000000000000000001";
+        let state = State::new();
+        // Insufficient balance → execute receipt failed; must not commit.
+        state.set_balance(&alice, 1);
+        state.set_uplp_balance(&alice, 10);
+        state.set_nonce(&alice, 0);
+        let tx = signed_tx(&mn, &alpha, &alice, bob, 50, 1, 0);
+        let batch = OrderedBatch::new("f-bad".into(), 1, vec![tx]).unwrap();
+
+        let mut mem = InMemoryStorageEngine::from_state(&state);
+        let (res, commit) =
+            finalize_to_storage(&state, &batch, ExecuteOptions::default(), &mut mem).unwrap();
+        assert!(!res.ok);
+        assert!(!res.persisted);
+        assert!(commit.is_none());
+        assert_eq!(res.phase, FinalizePhase::Execute);
+        assert_eq!(mem.get_account(&alice).unwrap().plp_balance, "1");
     }
 }

@@ -119,8 +119,17 @@ pub fn configured_admin_token() -> Option<String> {
 }
 
 /// Dev/test escape hatch — privileged RPC without token.
+/// Fail closed when multi-node Melancholy requests insecure mode (issue #49).
 pub fn rpc_insecure_allowed() -> bool {
-    env_truthy("PLATARIUM_CORE_RPC_INSECURE")
+    if !env_truthy("PLATARIUM_CORE_RPC_INSECURE") {
+        return false;
+    }
+    if crate::core::runtime_gates::multi_node_enabled()
+        && crate::core::runtime_gates::melancholy_profile()
+    {
+        return false;
+    }
+    true
 }
 
 /// Server-side testnet minting gate (`PLATARIUM_CORE_TESTNET` or `PLATARIUM_TESTNET`).
@@ -305,8 +314,22 @@ mod tests {
     #[test]
     fn privileged_allowed_when_insecure() {
         let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("PLATARIUM_CORE_MULTI_NODE");
+        std::env::remove_var("PLATARIUM_CORE_PROFILE");
         std::env::set_var("PLATARIUM_CORE_RPC_INSECURE", "1");
         assert!(authorize_rpc_method("state_apply_tx", None).is_ok());
+        std::env::remove_var("PLATARIUM_CORE_RPC_INSECURE");
+    }
+
+    #[test]
+    fn insecure_denied_for_multi_node_melancholy() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("PLATARIUM_CORE_MULTI_NODE", "1");
+        std::env::set_var("PLATARIUM_CORE_PROFILE", "melancholy");
+        std::env::set_var("PLATARIUM_CORE_RPC_INSECURE", "1");
+        assert!(!rpc_insecure_allowed());
+        std::env::remove_var("PLATARIUM_CORE_MULTI_NODE");
+        std::env::remove_var("PLATARIUM_CORE_PROFILE");
         std::env::remove_var("PLATARIUM_CORE_RPC_INSECURE");
     }
 
