@@ -538,6 +538,10 @@ mod escrow_engine_tests {
             None,
         );
         assert!(err.is_err(), "contact lock without node must fail");
+        // Legacy lock_contact_escrow likewise refuses empty node.
+        assert!(state
+            .lock_contact_escrow(&locker, "empty-n-legacy", &beneficiary, "", 100_000, 1, None)
+            .is_err());
 
         // Lock correctly, then reject settler-supplied alternate node even if matching payee.
         state
@@ -578,6 +582,78 @@ mod escrow_engine_tests {
         assert_eq!(state.get_balance(&attacker), 0);
         assert_eq!(
             state.get_escrow("bound-n").unwrap().status,
+            EscrowStatus::Locked
+        );
+    }
+
+    #[test]
+    fn empty_lock_beneficiary_rejected_and_settler_cannot_choose_payee() {
+        // R2-H5 / C5: contact rules credit receiver ⇒ beneficiary required at lock;
+        // settler cannot supply settle_payee when lock left payee unbound (issues #104 / #107).
+        let state = State::new();
+        let locker = "LoPay".to_string();
+        let node = "NodePay".to_string();
+        state.set_balance(&locker, 2_000_000);
+        state.set_uplp_balance(&locker, 20);
+        let err = state.escrow_lock(
+            &locker,
+            "empty-b",
+            "",
+            &node,
+            100_000,
+            &Asset::PLP,
+            PURPOSE_CONTACT,
+            0,
+            0,
+            "lh",
+            1,
+            None,
+        );
+        assert!(err.is_err(), "contact lock without beneficiary must fail");
+        assert!(state
+            .lock_contact_escrow(&locker, "empty-b-legacy", "", &node, 100_000, 1, None)
+            .is_err());
+
+        // Bound lock: settler-supplied alternate payee rejected.
+        let beneficiary = "BenePay".to_string();
+        state
+            .escrow_lock(
+                &locker,
+                "bound-b",
+                &beneficiary,
+                &node,
+                100_000,
+                &Asset::PLP,
+                PURPOSE_CONTACT,
+                0,
+                0,
+                "lh",
+                1,
+                None,
+            )
+            .unwrap();
+        state.set_uplp_balance(&beneficiary, 10);
+        let attacker = "AttackerPayee".to_string();
+        let err = state.escrow_settle(
+            &beneficiary,
+            "bound-b",
+            100_000,
+            1,
+            OUTCOME_ACCEPT,
+            AddressBindings {
+                sender: locker.clone(),
+                receiver: attacker.clone(),
+                node: node.clone(),
+                treasury: "treasury".into(),
+                burn: "burn".into(),
+            },
+            "sh",
+            None,
+        );
+        assert!(err.is_err());
+        assert_eq!(state.get_balance(&attacker), 0);
+        assert_eq!(
+            state.get_escrow("bound-b").unwrap().status,
             EscrowStatus::Locked
         );
     }

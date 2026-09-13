@@ -69,6 +69,9 @@ pub fn insecure_rpc_env_set() -> bool {
 }
 
 /// Multi-node Melancholy must not enable insecure RPC (issue #49).
+///
+/// Broader multi-node + `RPC_INSECURE` refusal (including non-Melancholy) is
+/// enforced by [`assert_multi_node_insecure_remote_sign`] (issue #50).
 pub fn assert_insecure_rpc_for_profile() -> Result<()> {
     if insecure_rpc_env_set() && multi_node_enabled() && melancholy_profile() {
         return Err(PlatariumError::State(
@@ -333,6 +336,24 @@ mod tests {
             .expect_err("must not silently accept unsigned L2 votes in multi-node");
         assert!(
             err.to_string().contains("multi-node") || err.to_string().contains("unsigned"),
+            "{err}"
+        );
+        clear_gate_env();
+    }
+
+    /// Dedicated multi-node rejection path for `l2_process_votes_json` (issues #50 / #102).
+    #[test]
+    fn multi_node_l2_unsigned_votes_path_rejected() {
+        use crate::core::consensus_cli::l2_process_votes_json;
+
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_gate_env();
+        assert!(l2_process_votes_json(r#"[{"node_id":"v1","yes":true}]"#).is_ok());
+        std::env::set_var("PLATARIUM_CORE_MULTI_NODE", "1");
+        let err = l2_process_votes_json(r#"[{"node_id":"v1","yes":true}]"#)
+            .expect_err("l2_process_votes_json must fail closed under multi-node");
+        assert!(
+            err.to_string().contains("multi-node") && err.to_string().contains("unsigned"),
             "{err}"
         );
         clear_gate_env();
