@@ -222,12 +222,22 @@ pub fn authorize_rpc_method_with_admin(
     if is_public_method(method) {
         return Ok(());
     }
-    // H7: mnemonic/key material must not cross the serve boundary by default.
-    if is_secret_method(method) && !remote_sign_allowed() && !rpc_insecure_allowed() {
-        return Err(PlatariumError::State(
-            "RPC method blocked: remote sign/keygen disabled (set PLATARIUM_CORE_ALLOW_REMOTE_SIGN=1 only for local tooling)"
-                .into(),
-        ));
+    // H7 / issue #50: mnemonic/key material must not cross the serve boundary by
+    // default. Multi-node always fail-closes remote sign/keygen — `RPC_INSECURE`
+    // is not a bypass (non-Melancholy multi-node included).
+    if is_secret_method(method) {
+        if crate::core::runtime_gates::multi_node_enabled() {
+            return Err(PlatariumError::State(
+                "RPC method blocked: multi-node remote sign/keygen forbidden (fail closed; unset PLATARIUM_CORE_MULTI_NODE)"
+                    .into(),
+            ));
+        }
+        if !remote_sign_allowed() && !rpc_insecure_allowed() {
+            return Err(PlatariumError::State(
+                "RPC method blocked: remote sign/keygen disabled (set PLATARIUM_CORE_ALLOW_REMOTE_SIGN=1 only for local tooling)"
+                    .into(),
+            ));
+        }
     }
     if rpc_insecure_allowed() {
         return Ok(());
@@ -310,9 +320,8 @@ pub fn authorize_rocks_admin_token(admin_token: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // Share the Core gate env lock with runtime_gates / block_cycle (issue #98).
+    use crate::core::runtime_gates::GATE_ENV_LOCK as ENV_LOCK;
 
     #[test]
     fn public_ping_always_ok() {
@@ -423,6 +432,8 @@ mod tests {
     fn multi_node_hard_gates_remote_sign_and_unsigned_dag() {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var("PLATARIUM_CORE_MULTI_NODE");
+        std::env::remove_var("PLATARIUM_CORE_PROFILE");
+        std::env::remove_var("PLATARIUM_CORE_RPC_INSECURE");
         std::env::set_var("PLATARIUM_CORE_ALLOW_REMOTE_SIGN", "1");
         std::env::set_var("PLATARIUM_DAG_ALLOW_UNSIGNED", "1");
         assert!(remote_sign_allowed());
@@ -431,7 +442,16 @@ mod tests {
         assert!(!remote_sign_allowed());
         assert!(!dag_unsigned_allowed());
         assert!(authorize_rpc_method("sign_transaction", None).is_err());
+        assert!(authorize_rpc_method("sign_message", None).is_err());
+        assert!(authorize_rpc_method("generate_keys", None).is_err());
+        // Issue #50: RPC_INSECURE must not reopen remote sign under multi-node.
+        std::env::set_var("PLATARIUM_CORE_RPC_INSECURE", "1");
+        std::env::remove_var("PLATARIUM_CORE_ALLOW_REMOTE_SIGN");
+        assert!(authorize_rpc_method("sign_transaction", None).is_err());
+        assert!(authorize_rpc_method("generate_keys", None).is_err());
+        assert!(authorize_rpc_method("sign_message", None).is_err());
         std::env::remove_var("PLATARIUM_CORE_MULTI_NODE");
+        std::env::remove_var("PLATARIUM_CORE_RPC_INSECURE");
         std::env::remove_var("PLATARIUM_CORE_ALLOW_REMOTE_SIGN");
         std::env::remove_var("PLATARIUM_DAG_ALLOW_UNSIGNED");
     }

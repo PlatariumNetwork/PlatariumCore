@@ -489,7 +489,10 @@ mod tests {
         assert_eq!(got.nonce, 0);
     }
 
-    /// Issue #34: StateDiff token_balances/xp map into Rocks AccountRecord WriteBatch.
+    /// Issue #34 / #97: StateDiff token_balances/xp map into Rocks AccountRecord WriteBatch.
+    ///
+    /// Proves `account_record_from_post_image` copies tokens and derives xp, and that
+    /// `commit_state_diff` persists those fields in the encoded WriteBatch payload.
     #[test]
     fn state_diff_tokens_xp_reach_rocks_write_batch() {
         use crate::core::kernel::commit_engine::commit_state_diff;

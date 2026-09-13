@@ -69,6 +69,7 @@ pub const GATEWAY_CORE_ERROR_NOT_ACCEPT_DOC: &str = concat!(
 /// Test module/path anchors for I1–I10 (issue #89; all linked to executable tests).
 ///
 /// Format: `cargo_module_path` → `source_file` (stable discovery string).
+/// Name retained for API stability; values are real paths (not ellipsis placeholders).
 pub const PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS: &[&str] = &[
     "core::protocol_invariants::tests::i1_same_block_state_diff → src/core/protocol_invariants.rs",
     "core::protocol_invariants::tests::i2_invalid_signature_never_executable → src/core/protocol_invariants.rs",
@@ -83,6 +84,10 @@ pub const PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS: &[&str] = &[
 ];
 
 /// Documented `cargo test` / CI invocation for I1–I10 (issue #89).
+///
+/// Run both commands in CI (or locally) to cover the full invariant suite:
+/// `cargo test --lib core::protocol_invariants::` then
+/// `cargo test --test protocol_invariants_i5_i10`.
 pub const PROTOCOL_INVARIANT_CARGO_TEST_INVOCATION: &str = concat!(
     "cargo test --lib core::protocol_invariants::; ",
     "cargo test --test protocol_invariants_i5_i10"

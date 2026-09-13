@@ -8,7 +8,7 @@
 //! | Flag / mode | Default | Solo/dev exception |
 //! |-------------|---------|--------------------|
 //! | `auto_confirm` | `false` | Allowed when multi-node unset |
-//! | `PLATARIUM_CORE_RPC_INSECURE` | off | Allowed when not multi-node Melancholy |
+//! | `PLATARIUM_CORE_RPC_INSECURE` | off | Allowed only when multi-node unset |
 //! | `PLATARIUM_CORE_ALLOW_REMOTE_SIGN` | off | Allowed only when multi-node unset |
 //! | Unsigned L1/L2 vote tallies (`l*_process_votes`) | N/A (trust-caller CLI) | Solo only; multi-node refused |
 //! | `PLATARIUM_DAG_ALLOW_UNSIGNED` | off | Solo/test only; multi-node refused |
@@ -17,8 +17,9 @@
 //!
 //! When [`melancholy_profile`] and [`multi_node_enabled`] are both set, Core refuses
 //! insecure RPC at serve. Independently, **any** multi-node deployment fail-closes
-//! `auto_confirm`, remote sign, unsigned vote tallies, and unsigned DAG admission
-//! even if the env flag is set (see [`MELANCHOLY_MULTI_NODE_DEFAULTS_DOC`]).
+//! `auto_confirm`, remote sign (including the `RPC_INSECURE` bypass of secret RPC),
+//! unsigned vote tallies, and unsigned DAG admission even if the env flag is set
+//! (see [`MELANCHOLY_MULTI_NODE_DEFAULTS_DOC`]).
 
 use crate::error::{PlatariumError, Result};
 
@@ -111,11 +112,32 @@ pub fn assert_unsigned_dag_allowed() -> Result<()> {
     Ok(())
 }
 
+/// Multi-node + `RPC_INSECURE` must not open remote sign/keygen (issue #50).
+///
+/// Melancholy multi-node already refuses insecure via [`assert_insecure_rpc_for_profile`];
+/// this catches the non-Melancholy path where `rpc_insecure_allowed` would otherwise
+/// bypass secret-method ACL.
+pub fn assert_multi_node_insecure_remote_sign() -> Result<()> {
+    if multi_node_enabled() && insecure_rpc_env_set() {
+        return Err(PlatariumError::State(
+            "config error: multi-node + PLATARIUM_CORE_RPC_INSECURE refused (opens remote sign/keygen bypass; fail closed)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Call from `serve` before binding listeners.
 pub fn assert_serve_runtime_gates() -> Result<()> {
     assert_insecure_rpc_for_profile()?;
-    // Fail closed if someone left remote-sign on under multi-node.
+    // Fail closed if someone left remote-sign on under multi-node (issue #50).
     assert_remote_sign_config(env_truthy("PLATARIUM_CORE_ALLOW_REMOTE_SIGN"))?;
+    // Fail closed if INSECURE would bypass remote-sign ACL under multi-node (issue #50).
+    assert_multi_node_insecure_remote_sign()?;
+    // Fail closed if unsigned DAG admission was left enabled under multi-node (issue #51).
+    if env_truthy("PLATARIUM_DAG_ALLOW_UNSIGNED") {
+        assert_unsigned_dag_allowed()?;
+    }
     Ok(())
 }
 
@@ -127,7 +149,8 @@ pub const SOLO_AUTO_CONFIRM_DOC: &str =
 pub const MELANCHOLY_MULTI_NODE_DEFAULTS_DOC: &str = concat!(
     "melancholy multi-node defaults fail-closed: ",
     "auto_confirm=false/rejected; RPC_INSECURE refused; ",
-    "ALLOW_REMOTE_SIGN refused; unsigned L1/L2 tallies refused; ",
+    "ALLOW_REMOTE_SIGN refused; RPC_INSECURE remote-sign bypass refused; ",
+    "unsigned L1/L2 tallies refused; ",
     "DAG_ALLOW_UNSIGNED refused; ",
     "solo/dev exceptions default-off (require explicit flag when multi-node unset)"
 );
@@ -207,6 +230,29 @@ mod tests {
             err.to_string().contains("multi-node") && err.to_string().contains("unsigned"),
             "{err}"
         );
+        // Serve must refuse ALLOW_REMOTE_SIGN under multi-node.
+        std::env::set_var("PLATARIUM_CORE_ALLOW_REMOTE_SIGN", "1");
+        let err = assert_serve_runtime_gates().unwrap_err();
+        assert!(
+            err.to_string().contains("multi-node") && err.to_string().contains("remote sign"),
+            "{err}"
+        );
+        clear_gate_env();
+    }
+
+    #[test]
+    fn multi_node_insecure_remote_sign_bypass_refused_at_serve() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_gate_env();
+        // Non-Melancholy multi-node + INSECURE must not start serve (issue #50).
+        std::env::set_var("PLATARIUM_CORE_MULTI_NODE", "1");
+        std::env::set_var("PLATARIUM_CORE_RPC_INSECURE", "1");
+        let err = assert_serve_runtime_gates().unwrap_err();
+        assert!(
+            err.to_string().contains("multi-node")
+                && (err.to_string().contains("INSECURE") || err.to_string().contains("remote sign")),
+            "{err}"
+        );
         clear_gate_env();
     }
 
@@ -217,6 +263,13 @@ mod tests {
         assert!(assert_unsigned_dag_allowed().is_ok());
         std::env::set_var("PLATARIUM_CORE_MULTI_NODE", "1");
         let err = assert_unsigned_dag_allowed().unwrap_err();
+        assert!(
+            err.to_string().contains("multi-node") && err.to_string().contains("DAG"),
+            "{err}"
+        );
+        // Serve must refuse DAG_ALLOW_UNSIGNED under multi-node (issue #51).
+        std::env::set_var("PLATARIUM_DAG_ALLOW_UNSIGNED", "1");
+        let err = assert_serve_runtime_gates().unwrap_err();
         assert!(
             err.to_string().contains("multi-node") && err.to_string().contains("DAG"),
             "{err}"
@@ -269,6 +322,15 @@ mod tests {
         // Path 2: unsigned L1 vote tallies refused under multi-node (no Gateway).
         let err = l1_process_votes_json(r#"[{"node_id":"v1","yes":true}]"#)
             .expect_err("must not silently accept unsigned votes in multi-node");
+        assert!(
+            err.to_string().contains("multi-node") || err.to_string().contains("unsigned"),
+            "{err}"
+        );
+
+        // Path 3: unsigned L2 vote tallies likewise refused (issue #50).
+        use crate::core::consensus_cli::l2_process_votes_json;
+        let err = l2_process_votes_json(r#"[{"node_id":"v1","yes":true}]"#)
+            .expect_err("must not silently accept unsigned L2 votes in multi-node");
         assert!(
             err.to_string().contains("multi-node") || err.to_string().contains("unsigned"),
             "{err}"

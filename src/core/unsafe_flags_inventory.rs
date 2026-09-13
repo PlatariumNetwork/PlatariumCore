@@ -8,7 +8,7 @@
 //! | Flag / param | Entrypoint | Default | Gate owner | Notes |
 //! |--------------|------------|---------|------------|-------|
 //! | `auto_confirm` (JSON bool) | [`block_cycle_json`](crate::core::block_cycle::block_cycle_json) | `false` | **Core** | Synthesizes unsigned L1/L2 Confirm vote tallies for **solo/test only**; rejected when `PLATARIUM_CORE_MULTI_NODE` is set (see [`runtime_gates`](crate::core::runtime_gates)). |
-//! | `PLATARIUM_CORE_RPC_INSECURE` | [`rpc_security`](crate::core::rpc_security) / serve ACL | off | **Core** | Disables RPC token ACL (local tests only). **Refused** for multi-node Melancholy at serve. |
+//! | `PLATARIUM_CORE_RPC_INSECURE` | [`rpc_security`](crate::core::rpc_security) / serve ACL | off | **Core** | Disables RPC token ACL (local tests only). **Refused** for multi-node Melancholy at serve (#49); **any** multi-node + insecure also refused at serve because it opens remote sign/keygen (#50). |
 //! | `PLATARIUM_CORE_MULTI_NODE` | [`runtime_gates`](crate::core::runtime_gates) | off | **Core** | Marks multi-node; gates `auto_confirm`, remote sign, unsigned votes/DAG, and (with Melancholy profile) insecure RPC. |
 //! | `PLATARIUM_CORE_PROFILE` / `PLATARIUM_NETWORK` | [`runtime_gates`](crate::core::runtime_gates) | unset | **Core** | `melancholy` profile pairs with multi-node insecure gate. |
 //! | `PLATARIUM_CORE_ALLOW_REMOTE_SIGN` | `generate_*` / `sign_*` RPC | off | **Core** | Remote keygen/sign over JSON-RPC. **Refused** when multi-node (issue #50). |
