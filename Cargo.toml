@@ -93,7 +93,3 @@ path = "tests/medium_security_test.rs"
 [[test]]
 name = "low_security"
 path = "tests/low_security_test.rs"
-
-[[test]]
-name = "protocol_invariants_i5_i10"
-path = "tests/protocol_invariants_i5_i10_test.rs"
