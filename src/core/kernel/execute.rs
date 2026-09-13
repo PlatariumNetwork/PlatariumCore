@@ -3,7 +3,7 @@
 use crate::core::asset::Asset;
 use crate::core::execution::{ExecutionContext, ExecutionLogic};
 use crate::core::kernel::ordered_batch::OrderedBatch;
-use crate::core::kernel::scheduler::{compute_waves, ExecutionWave};
+use crate::core::kernel::scheduler::{compute_waves_with_state, ExecutionWave};
 use crate::core::kernel::state_diff::{
     AccountPostImage, StateDiff, TxReceipt, STATE_DIFF_SCHEMA_VERSION,
 };
@@ -42,7 +42,7 @@ pub fn execute_ordered_batch(
     batch.validate()?;
     let pre_root = pre_state.snapshot().compute_state_root();
     let waves = if opts.parallel {
-        compute_waves(batch)
+        compute_waves_with_state(batch, Some(pre_state))
     } else {
         // One tx per wave preserves sequential semantics explicitly.
         (0..batch.transactions.len())

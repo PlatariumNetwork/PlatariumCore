@@ -212,6 +212,7 @@ fn r2_c1_kernel_apply_batch_persists_contact_escrow() {
             "purpose": "contact",
             "expires_at": 1893456000u64,
             "settle_payee": payee,
+            "settle_node": "NodeCritR2C1",
         }),
     )
     .unwrap();
@@ -289,6 +290,7 @@ fn r2_c2_legacy_contact_escrow_lock_does_not_transfer() {
             "purpose": "contact",
             "expires_at": 1893456000u64,
             "settle_payee": payee,
+            "settle_node": "NodeCritR2C2",
         }),
     )
     .unwrap();

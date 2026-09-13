@@ -684,10 +684,18 @@ impl State {
         Self::debit_for_escrow_lock_in_maps(ab, ub, nonces, from, asset, amount, fee_uplp, expected_nonce)
     }
 
+    /// True when any outcome share resolves via the given role placeholder.
+    fn rules_credit_role(rules: &crate::modules::escrow::rules::EscrowRules, role: &str) -> bool {
+        rules
+            .outcomes
+            .values()
+            .any(|shares| shares.iter().any(|s| s.address.trim() == role))
+    }
+
     /// Generic escrow_lock.
     /// Validates escrow id uniqueness and balances under one lock set, then atomically
     /// debits and inserts so a failed lock cannot burn fees (C6).
-    /// Binds `beneficiary` and optional `node` at lock time (C5 / R2-H5).
+    /// Binds `beneficiary` / `node` at lock time when rules credit those roles (C5 / R2-H5).
     pub fn escrow_lock(
         &self,
         creator: &Address,
@@ -721,6 +729,19 @@ impl State {
         rules
             .validate_outcome("accept")
             .map_err(|e| StateError::Escrow(e.to_string()))?;
+        // C5 / R2-H5: payee/node destinations are fixed at lock for rules that credit them.
+        if Self::rules_credit_role(&rules, RECEIVER_ROLE) && beneficiary.trim().is_empty() {
+            return Err(StateError::Escrow(
+                EscrowError::MissingBinding(RECEIVER_ROLE.to_string()).to_string(),
+            )
+            .into());
+        }
+        if Self::rules_credit_role(&rules, NODE_ROLE) && node.trim().is_empty() {
+            return Err(StateError::Escrow(
+                EscrowError::MissingBinding(NODE_ROLE.to_string()).to_string(),
+            )
+            .into());
+        }
         let rules_hash = rules.hash_hex();
 
         // Atomic: uniqueness + balances + debit + insert under one lock set (C6).
@@ -769,10 +790,13 @@ impl State {
     }
 
     /// Legacy wrapper → generic escrow_lock (contact purpose).
+    /// `beneficiary` and `node` are required (contact rules credit receiver/node).
     pub fn lock_contact_escrow(
         &self,
         locker: &Address,
         request_id_hash: &str,
+        beneficiary: &str,
+        node: &str,
         amount_uplp: u128,
         fee_uplp: u128,
         expected_nonce: Option<u64>,
@@ -780,8 +804,8 @@ impl State {
         self.escrow_lock(
             locker,
             request_id_hash,
-            "",
-            "",
+            beneficiary,
+            node,
             amount_uplp,
             &Asset::PLP,
             PURPOSE_CONTACT,
@@ -836,6 +860,8 @@ impl State {
     }
 
     /// Force settle bindings to lock-time payee/node; reject settler redirects (C5 / R2-H5).
+    /// Settler-supplied settle_payee / settle_node are never authoritative: mismatch ⇒ error,
+    /// and an empty lock-time binding cannot be filled by the settler.
     fn bind_settle_addresses(entry: &Escrow, mut bind: AddressBindings) -> Result<AddressBindings> {
         if !bind.sender.is_empty() && bind.sender != entry.creator {
             return Err(StateError::Escrow(
@@ -845,27 +871,27 @@ impl State {
         }
         bind.sender = entry.creator.clone();
 
-        // Receiver is locked beneficiary when set — ignore settler-supplied settle_payee.
-        if !entry.beneficiary.is_empty() {
-            if !bind.receiver.is_empty() && bind.receiver != entry.beneficiary {
+        // Receiver: lock-time beneficiary only.
+        if !bind.receiver.is_empty() {
+            if entry.beneficiary.is_empty() || bind.receiver != entry.beneficiary {
                 return Err(StateError::Escrow(
                     EscrowError::BindingMismatch(RECEIVER_ROLE.to_string()).to_string(),
                 )
                 .into());
             }
-            bind.receiver = entry.beneficiary.clone();
         }
+        bind.receiver = entry.beneficiary.clone();
 
-        // Node cut is locked at lock time when set — ignore settler-supplied settle_node.
-        if !entry.node.is_empty() {
-            if !bind.node.is_empty() && bind.node != entry.node {
+        // Node: lock-time node only — never allow settler to choose the node-cut.
+        if !bind.node.is_empty() {
+            if entry.node.is_empty() || bind.node != entry.node {
                 return Err(StateError::Escrow(
                     EscrowError::BindingMismatch(NODE_ROLE.to_string()).to_string(),
                 )
                 .into());
             }
-            bind.node = entry.node.clone();
         }
+        bind.node = entry.node.clone();
 
         if bind.treasury.is_empty() {
             bind.treasury = TREASURY_ADDRESS.to_string();
@@ -1182,8 +1208,8 @@ impl State {
                 let outcome_key = tx
                     .settle_outcome_key()
                     .map_err(StateError::Escrow)?;
-                // R2-H5: settler-supplied settle_payee/settle_node are ignored when
-                // lock-time bindings exist (`bind_settle_addresses`).
+                // R2-H5 / C5: pass settler fields only for mismatch detection;
+                // `bind_settle_addresses` forces lock-time beneficiary/node.
                 let bindings = AddressBindings {
                     sender: String::new(),
                     receiver: tx.settle_payee.clone().unwrap_or_default(),

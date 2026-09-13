@@ -16,8 +16,8 @@ pub use state_diff::{
     diagnose_state_diff_mismatch, normalize_diff_value, AccountPostImage, StateDiff, TxReceipt,
     STATE_DIFF_SCHEMA_VERSION,
 };
-pub use touch::{conflict_touch_set, touch_set};
-pub use scheduler::{compute_waves, ExecutionWave};
+pub use touch::{conflict_touch_set, conflict_touch_set_with_state, touch_set, touch_set_with_state};
+pub use scheduler::{compute_waves, compute_waves_with_state, ExecutionWave};
 pub use execute::{clone_state, execute_ordered_batch, ExecuteOptions, ExecuteOutcome};
 pub use commit_engine::{commit_state_diff, CommitResult};
 pub use ordering::build_ordered_batch;

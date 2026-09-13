@@ -70,6 +70,52 @@ fn r2_m1_limited_reader_rejects_before_unbounded_alloc() {
 }
 
 #[test]
+fn r2_m1_limited_reader_rejects_stream_without_newline() {
+    // Continuous non-newline bytes must stop at the budget (no unbounded grow).
+    let max = 128usize;
+    let stream = vec![b'A'; max + 50_000];
+    let mut cursor = Cursor::new(stream);
+    let err = read_limited_rpc_line(&mut cursor, max).unwrap_err();
+    assert!(err.to_string().contains("too large"), "{err}");
+}
+
+/// R2-M2: shared/read token must not authorize mutate or storage-admin methods.
+#[test]
+fn r2_m2_tiered_acl_read_cannot_mutate_or_rocks_admin() {
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::remove_var("PLATARIUM_CORE_RPC_INSECURE");
+    std::env::remove_var("PLATARIUM_CORE_RPC_TOKEN");
+    std::env::set_var("PLATARIUM_CORE_RPC_READ_TOKEN", "read-only-m2");
+    std::env::set_var("PLATARIUM_CORE_RPC_MUTATE_TOKEN", "mutate-m2");
+    std::env::set_var("PLATARIUM_CORE_ADMIN_TOKEN", "admin-m2");
+
+    use platarium_core::core::rpc_security::{
+        authorize_rpc_method, authorize_rpc_method_with_admin,
+    };
+    assert!(authorize_rpc_method("rocks_get_head", Some("read-only-m2")).is_ok());
+    assert!(authorize_rpc_method("rocks_commit_block", Some("read-only-m2")).is_err());
+    assert!(authorize_rpc_method("migrate_json_to_rocks", Some("read-only-m2")).is_err());
+    assert!(authorize_rpc_method("state_credit", Some("read-only-m2")).is_err());
+    assert!(authorize_rpc_method("state_credit", Some("mutate-m2")).is_ok());
+    assert!(authorize_rpc_method_with_admin(
+        "rocks_commit_block",
+        Some("mutate-m2"),
+        None
+    )
+    .is_err());
+    assert!(authorize_rpc_method_with_admin(
+        "rocks_commit_block",
+        Some("mutate-m2"),
+        Some("admin-m2")
+    )
+    .is_ok());
+
+    std::env::remove_var("PLATARIUM_CORE_RPC_READ_TOKEN");
+    std::env::remove_var("PLATARIUM_CORE_RPC_MUTATE_TOKEN");
+    std::env::remove_var("PLATARIUM_CORE_ADMIN_TOKEN");
+}
+
+#[test]
 fn m5_ping_does_not_require_state_lock_path() {
     // Smoke: ping succeeds without state_file (skips dispatch lock).
     let resp: serde_json::Value = serde_json::from_str(&handle_rpc_line(

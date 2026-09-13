@@ -222,6 +222,7 @@ mod tests {
                 "purpose": "contact",
                 "expires_at": 1893456000u64,
                 "settle_payee": payee,
+                "settle_node": "NodeLockR2C1",
             }),
         )
         .unwrap();

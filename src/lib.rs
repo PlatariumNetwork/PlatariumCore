@@ -181,7 +181,7 @@ pub use core::consensus_timestamp::{
     validate_consensus_timestamp, validate_timestamp_drift, validate_timestamp_monotonic,
 };
 pub use core::kernel::{
-    build_ordered_batch, clone_state, commit_state_diff, compute_waves, diagnose_state_diff_mismatch,
+    build_ordered_batch, clone_state, commit_state_diff, compute_waves, compute_waves_with_state, diagnose_state_diff_mismatch,
     execute_ordered_batch, AccountPostImage, CommitResult, ExecuteOptions, ExecuteOutcome,
     ExecutionWave, OrderedBatch, StateDiff, TxReceipt, STATE_DIFF_SCHEMA_VERSION,
 };

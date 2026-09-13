@@ -124,7 +124,7 @@ mod escrow_engine_tests {
         state.set_balance(&locker, 1_000_000);
         state.set_uplp_balance(&locker, 5);
         state
-            .lock_contact_escrow(&locker, "eid-3", 100_000, 1, None)
+            .lock_contact_escrow(&locker, "eid-3", &locker, "node3", 100_000, 1, None)
             .unwrap();
         let before = state.get_balance(&locker);
         state
@@ -134,7 +134,7 @@ mod escrow_engine_tests {
                 100_000,
                 1,
                 crate::core::contact_escrow::EscrowOutcome::Rejected,
-                None,
+                Some(&locker),
                 "node3",
                 None,
             )
@@ -270,7 +270,7 @@ mod escrow_engine_tests {
                 &locker,
                 "ref-1",
                 &settler,
-                "",
+                "node_ref",
                 200_000,
                 &Asset::PLP,
                 PURPOSE_CONTACT,
@@ -284,6 +284,7 @@ mod escrow_engine_tests {
         let before = state.get_balance(&locker);
         state.escrow_refund(&settler, "ref-1", 1, None).unwrap();
         assert_eq!(state.get_balance(&locker), before + 160_000); // 80% reject rule
+        assert_eq!(state.get_balance(&"node_ref".to_string()), 20_000);
         assert_eq!(
             state.get_escrow("ref-1").unwrap().status,
             EscrowStatus::Refunded
@@ -301,7 +302,7 @@ mod escrow_engine_tests {
                 &locker,
                 "can-1",
                 "Rb",
-                "",
+                "node_can",
                 100_000,
                 &Asset::PLP,
                 PURPOSE_CONTACT,
@@ -483,7 +484,7 @@ mod escrow_engine_tests {
                 &locker,
                 "auth-cr",
                 &beneficiary,
-                "",
+                "node_cr",
                 50_000,
                 &Asset::PLP,
                 PURPOSE_CONTACT,
@@ -510,6 +511,125 @@ mod escrow_engine_tests {
         assert_eq!(
             state.get_escrow("auth-cr").unwrap().status,
             EscrowStatus::Refunded
+        );
+    }
+
+    #[test]
+    fn empty_lock_node_rejected_and_settler_cannot_choose_node() {
+        // R2-H5 / C5: contact rules credit node ⇒ node required at lock;
+        // settler cannot supply settle_node when lock left it unbound.
+        let state = State::new();
+        let locker = "LoQa".to_string();
+        let beneficiary = "BbQa".to_string();
+        state.set_balance(&locker, 2_000_000);
+        state.set_uplp_balance(&locker, 20);
+        let err = state.escrow_lock(
+            &locker,
+            "empty-n",
+            &beneficiary,
+            "",
+            100_000,
+            &Asset::PLP,
+            PURPOSE_CONTACT,
+            0,
+            0,
+            "lh",
+            1,
+            None,
+        );
+        assert!(err.is_err(), "contact lock without node must fail");
+
+        // Lock correctly, then reject settler-supplied alternate node even if matching payee.
+        state
+            .escrow_lock(
+                &locker,
+                "bound-n",
+                &beneficiary,
+                "HonestNode",
+                100_000,
+                &Asset::PLP,
+                PURPOSE_CONTACT,
+                0,
+                0,
+                "lh",
+                1,
+                None,
+            )
+            .unwrap();
+        state.set_uplp_balance(&beneficiary, 10);
+        let attacker = "AttackerNodeQa".to_string();
+        let err = state.escrow_settle(
+            &beneficiary,
+            "bound-n",
+            100_000,
+            1,
+            OUTCOME_ACCEPT,
+            AddressBindings {
+                sender: locker.clone(),
+                receiver: beneficiary.clone(),
+                node: attacker.clone(),
+                treasury: "treasury".into(),
+                burn: "burn".into(),
+            },
+            "sh",
+            None,
+        );
+        assert!(err.is_err());
+        assert_eq!(state.get_balance(&attacker), 0);
+        assert_eq!(
+            state.get_escrow("bound-n").unwrap().status,
+            EscrowStatus::Locked
+        );
+    }
+
+    #[test]
+    fn settle_payee_redirect_to_attacker_rejected() {
+        // C5 QA: beneficiary accept must not redirect principal via settle bindings.
+        let state = State::new();
+        let locker = "Lb".to_string();
+        let beneficiary = "Bb".to_string();
+        let attacker = "Attacker".to_string();
+        state.set_balance(&locker, 2_000_000);
+        state.set_uplp_balance(&locker, 20);
+        state.set_uplp_balance(&beneficiary, 10);
+        state
+            .escrow_lock(
+                &locker,
+                "c5-redir",
+                &beneficiary,
+                "NodeOk",
+                1_000_000,
+                &Asset::PLP,
+                PURPOSE_CONTACT,
+                0,
+                0,
+                "lh",
+                1,
+                None,
+            )
+            .unwrap();
+        let err = state.escrow_settle(
+            &beneficiary,
+            "c5-redir",
+            1_000_000,
+            1,
+            OUTCOME_ACCEPT,
+            AddressBindings {
+                sender: locker,
+                receiver: attacker.clone(),
+                node: attacker.clone(),
+                treasury: "treasury".into(),
+                burn: "burn".into(),
+            },
+            "sh",
+            None,
+        );
+        assert!(err.is_err());
+        assert_eq!(state.get_balance(&attacker), 0);
+        assert_eq!(state.get_balance(&beneficiary), 0);
+        assert_eq!(
+            state.get_escrow("c5-redir").unwrap().status,
+            EscrowStatus::Locked
         );
     }
 
