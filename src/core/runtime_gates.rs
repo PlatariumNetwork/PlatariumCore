@@ -115,7 +115,7 @@ pub fn assert_unsigned_dag_allowed() -> Result<()> {
     Ok(())
 }
 
-/// Multi-node + `RPC_INSECURE` must not open remote sign/keygen (issue #50).
+/// Multi-node + `RPC_INSECURE` must not open remote sign/keygen (issues #50 / #110).
 ///
 /// Melancholy multi-node already refuses insecure via [`assert_insecure_rpc_for_profile`];
 /// this catches the non-Melancholy path where `rpc_insecure_allowed` would otherwise
@@ -135,7 +135,7 @@ pub fn assert_serve_runtime_gates() -> Result<()> {
     assert_insecure_rpc_for_profile()?;
     // Fail closed if someone left remote-sign on under multi-node (issue #50).
     assert_remote_sign_config(env_truthy("PLATARIUM_CORE_ALLOW_REMOTE_SIGN"))?;
-    // Fail closed if INSECURE would bypass remote-sign ACL under multi-node (issue #50).
+    // Fail closed if INSECURE would bypass remote-sign ACL under multi-node (#50 / #110).
     assert_multi_node_insecure_remote_sign()?;
     // Fail closed if unsigned DAG admission was left enabled under multi-node (issue #51).
     if env_truthy("PLATARIUM_DAG_ALLOW_UNSIGNED") {
@@ -247,7 +247,7 @@ mod tests {
     fn multi_node_insecure_remote_sign_bypass_refused_at_serve() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_gate_env();
-        // Non-Melancholy multi-node + INSECURE must not start serve (issue #50).
+        // Non-Melancholy multi-node + INSECURE must not start serve (issues #50 / #110).
         std::env::set_var("PLATARIUM_CORE_MULTI_NODE", "1");
         std::env::set_var("PLATARIUM_CORE_RPC_INSECURE", "1");
         let err = assert_serve_runtime_gates().unwrap_err();
@@ -256,6 +256,8 @@ mod tests {
                 && (err.to_string().contains("INSECURE") || err.to_string().contains("remote sign")),
             "{err}"
         );
+        // PROFILE / Melancholy unset — still refused (issue #110).
+        assert!(std::env::var("PLATARIUM_CORE_PROFILE").is_err());
         clear_gate_env();
     }
 

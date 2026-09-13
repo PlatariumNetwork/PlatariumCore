@@ -1,8 +1,9 @@
-//! Core protocol invariants I1–I10 (issue #78 / #89).
+//! Core protocol invariants I1–I10 (issue #78 / #89 / #101 / #111–#114).
 //!
 //! Short freeze of consensus/execution safety rules. Executable coverage for
 //! **I1–I10** lives in this module (`#[cfg(test)]`). Each `Ii` links to a real
-//! test name and path (issue #89 / #109).
+//! `#[test]` function path — no `tests/…#…` ellipsis placeholders (issues #89 /
+//! #101 / #109 / #111 / #112 / #113 / #114).
 //!
 //! | Id | Statement | Test module / path |
 //! |----|-----------|--------------------|
@@ -17,19 +18,25 @@
 //! | **I9** | Restart preserves canonical state. | `core::protocol_invariants::tests::i9_restart_preserves_canonical` → `src/core/protocol_invariants.rs` |
 //! | **I10** | A Core error cannot imply consensus acceptance. | `core::protocol_invariants::tests::i10_core_error_not_consensus_accept` → `src/core/protocol_invariants.rs` |
 //!
-//! ## Cargo / CI invocation (issue #89 / #109)
+//! ## Cargo / CI invocation (issues #89 / #101 / #109 / #111 / #112 / #113 / #114)
 //!
-//! See [`PROTOCOL_INVARIANT_CARGO_TEST_INVOCATION`]. Locally or in CI (covers I1–I10):
+//! Canonical documented command for the I1–I10 suite (this module is the adjacent
+//! doc when README has no `.github` workflow): see
+//! [`PROTOCOL_INVARIANT_CARGO_TEST_INVOCATION`]. Locally or in CI:
 //!
 //! ```text
 //! cargo test --lib core::protocol_invariants::
 //! ```
+//!
+//! That single invocation lists and runs `i1_`…`i10_` plus
+//! `protocol_invariants_i1_through_i10_listed`.
 //!
 //! Single-invariant filters (examples):
 //!
 //! ```text
 //! cargo test --lib core::protocol_invariants::tests::i1_same_block_state_diff
 //! cargo test --lib core::protocol_invariants::tests::i5_tokens_xp_persist
+//! cargo test --lib core::protocol_invariants::tests::i10_core_error_not_consensus_accept
 //! ```
 //!
 //! See also [`crate::core::protocol_notes`] (clocks) and
@@ -65,10 +72,11 @@ pub const GATEWAY_CORE_ERROR_NOT_ACCEPT_DOC: &str = concat!(
     "must not be mapped to consensus accept or block finalized"
 );
 
-/// Test module/path anchors for I1–I10 (issue #89 / #109; all linked to executable tests).
+/// Test module/path anchors for I1–I10 (issues #89 / #101 / #109 / #111–#114).
 ///
 /// Format: `cargo_module_path` → `source_file` (stable discovery string).
-/// Name retained for API stability; values are real module/paths (not ellipsis placeholders).
+/// Name retained for API stability; values are real module/paths (not ellipsis
+/// placeholders such as `tests/…#i5_…`).
 pub const PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS: &[&str] = &[
     "core::protocol_invariants::tests::i1_same_block_state_diff → src/core/protocol_invariants.rs",
     "core::protocol_invariants::tests::i2_invalid_signature_never_executable → src/core/protocol_invariants.rs",
@@ -82,10 +90,12 @@ pub const PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS: &[&str] = &[
     "core::protocol_invariants::tests::i10_core_error_not_consensus_accept → src/core/protocol_invariants.rs",
 ];
 
-/// Documented `cargo test` / CI invocation for I1–I10 (issue #89 / #109).
+/// Documented `cargo test` / CI invocation for I1–I10 (issues #89 / #101 / #111–#114).
 ///
 /// Run in CI (or locally) to cover the full invariant suite:
 /// `cargo test --lib core::protocol_invariants::`.
+/// This const is the concrete cargo/CI invocation documented adjacent to the
+/// invariant catalog when no `.github` workflow is present.
 pub const PROTOCOL_INVARIANT_CARGO_TEST_INVOCATION: &str =
     "cargo test --lib core::protocol_invariants::";
 
@@ -220,6 +230,25 @@ mod tests {
             "cargo test --lib core::protocol_invariants::",
             "CI/cargo invocation must document the I1–I10 lib suite"
         );
+        // Issues #111–#114: I5–I10 must resolve to real lib tests (not tests/… placeholders).
+        for idx in 4..10 {
+            let path = PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS[idx];
+            assert!(
+                path.starts_with("core::protocol_invariants::tests::i"),
+                "I{} must link a real lib test path: {path}",
+                idx + 1
+            );
+            assert!(
+                !path.contains("tests/…") && !path.contains("#i"),
+                "I{} must not use ellipsis placeholder path: {path}",
+                idx + 1
+            );
+            assert!(
+                path.contains("src/core/protocol_invariants.rs"),
+                "I{} must point at src/core/protocol_invariants.rs: {path}",
+                idx + 1
+            );
+        }
         assert!(PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS[0]
             .contains("core::protocol_invariants::tests::i1_same_block_state_diff"));
         assert!(PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS[0]
