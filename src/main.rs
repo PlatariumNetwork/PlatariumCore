@@ -245,6 +245,30 @@ enum Commands {
         #[arg(long)]
         db_path: String,
     },
+
+    /// Write orchestrator qa-verdict.json into a worktree (issues #97 / #115)
+    WriteQaVerdict {
+        /// Worktree directory (default: current directory)
+        #[arg(long, default_value = ".")]
+        worktree: String,
+        /// passed | failed
+        #[arg(long)]
+        status: String,
+        #[arg(long, default_value = "")]
+        problem: String,
+        #[arg(long, default_value = "")]
+        reproduction: String,
+        #[arg(long, default_value = "")]
+        expected: String,
+        #[arg(long, default_value = "")]
+        actual: String,
+    },
+
+    /// Ensure qa-verdict.json exists; write failed verdict if missing (#97 / #115)
+    EnsureQaVerdict {
+        #[arg(long, default_value = ".")]
+        worktree: String,
+    },
     /// RocksDB: get chain head height
     RocksGetHead {
         #[arg(long)]
@@ -434,6 +458,15 @@ fn main() {
             mempool_txs,
         } => handle_select_block_txs(state_file, mempool_txs),
         Commands::CheckConsistency { db_path } => handle_check_consistency(db_path),
+        Commands::WriteQaVerdict {
+            worktree,
+            status,
+            problem,
+            reproduction,
+            expected,
+            actual,
+        } => handle_write_qa_verdict(worktree, status, problem, reproduction, expected, actual),
+        Commands::EnsureQaVerdict { worktree } => handle_ensure_qa_verdict(worktree),
         Commands::RocksGetHead { db_path } => handle_rocks_get_head(db_path),
         Commands::RocksGetTx { db_path, tx_hash } => handle_rocks_get_tx(db_path, tx_hash),
         Commands::RocksGetBlock { db_path, height } => handle_rocks_get_block(db_path, height),
@@ -832,6 +865,49 @@ fn handle_min_fee_from_load(pending_count: usize) -> std::result::Result<(), Box
 
 fn handle_rocks_get_head(db_path: String) -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("{}", rocks_get_head_json(&db_path)?);
+    Ok(())
+}
+
+fn handle_write_qa_verdict(
+    worktree: String,
+    status: String,
+    problem: String,
+    reproduction: String,
+    expected: String,
+    actual: String,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let status = status.to_ascii_lowercase();
+    if status != platarium_core::QA_STATUS_PASSED && status != platarium_core::QA_STATUS_FAILED {
+        return Err(format!(
+            "status must be '{}' or '{}', got '{}'",
+            platarium_core::QA_STATUS_PASSED,
+            platarium_core::QA_STATUS_FAILED,
+            status
+        )
+        .into());
+    }
+    let verdict = platarium_core::QaVerdict {
+        status,
+        problem,
+        reproduction,
+        expected,
+        actual,
+    };
+    let path = platarium_core::write_qa_verdict(&worktree, &verdict)?;
+    println!("{{\"ok\":true,\"path\":\"{}\"}}", path.display());
+    Ok(())
+}
+
+fn handle_ensure_qa_verdict(
+    worktree: String,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let path = platarium_core::ensure_qa_verdict(&worktree)?;
+    let v = platarium_core::read_qa_verdict(&worktree)?;
+    println!(
+        "{{\"ok\":true,\"path\":\"{}\",\"status\":\"{}\"}}",
+        path.display(),
+        v.status
+    );
     Ok(())
 }
 

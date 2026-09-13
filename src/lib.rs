@@ -209,6 +209,11 @@ pub use core::protocol_invariants::{
     GATEWAY_CORE_ERROR_NOT_ACCEPT_DOC, PROTOCOL_INVARIANTS_DOC,
     PROTOCOL_INVARIANT_CARGO_TEST_INVOCATION, PROTOCOL_INVARIANT_TEST_PATH_PLACEHOLDERS,
 };
+pub use core::qa_verdict::{
+    ensure_qa_verdict, qa_verdict_json, qa_verdict_path, read_qa_verdict, write_qa_verdict,
+    QaVerdict, QA_VERDICT_FILENAME, STATUS_FAILED as QA_STATUS_FAILED,
+    STATUS_PASSED as QA_STATUS_PASSED,
+};
 pub use core::failpoints::{
     arm as failpoint_arm, clear as failpoint_clear, clear_all as failpoint_clear_all, hit as failpoint_hit,
     is_armed as failpoint_is_armed, FP_AFTER_ROCKS_WRITE, FP_AFTER_STATE_WRITE, FP_BEFORE_COMMIT,

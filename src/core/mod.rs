@@ -42,6 +42,7 @@ pub mod protocol_notes;
 pub mod protocol_invariants;
 pub mod unsafe_flags_inventory;
 pub mod runtime_gates;
+pub mod qa_verdict;
 
 use crate::error::{PlatariumError, Result};
 use crate::core::transaction::Transaction;
