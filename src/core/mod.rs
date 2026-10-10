@@ -31,6 +31,9 @@ pub mod consensus_cli;
 pub mod core_rpc;
 pub mod rpc_security;
 pub mod kernel;
+
+#[cfg(test)]
+mod deal_escrow_tests;
 pub mod dag;
 pub mod finalize_contract;
 pub mod failpoints;

@@ -59,6 +59,12 @@ pub struct Escrow {
     #[serde(default)]
     pub node: String,
     pub amount: u128,
+    /// Peaceful node fee captured at lock. 0 on contact and on older records.
+    #[serde(default)]
+    pub peaceful_fee: u128,
+    /// Dispute fee reserved at lock. 0 on contact and on older records.
+    #[serde(default)]
+    pub reserved_fee: u128,
     /// Asset canonical string (e.g. "PLP").
     pub asset: String,
     /// Application purpose tag, e.g. "contact".

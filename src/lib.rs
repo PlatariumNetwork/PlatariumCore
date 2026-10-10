@@ -29,7 +29,8 @@ pub use modules::escrow::{
     Escrow, EscrowRules, EscrowStatus, RuleShare, TX_KIND_ESCROW_CANCEL, TX_KIND_ESCROW_LOCK,
     TX_KIND_ESCROW_REFUND, TX_KIND_ESCROW_SETTLE,
 };
-pub use modules::contacteconomy::{contact_default_rules, PURPOSE_CONTACT};
+pub use modules::contacteconomy::{contact_default_rules, PURPOSE_CONTACT, PURPOSE_DEAL};
+pub use modules::escrow::{deal_fee_uplp, deal_rules};
 pub use modules::payment::{Payment, PlpPayment};
 pub use core::contact_escrow::{
     ContactEscrowEntry, EscrowOutcome, TX_KIND_CONTACT_ESCROW_LOCK, TX_KIND_CONTACT_ESCROW_SETTLE,

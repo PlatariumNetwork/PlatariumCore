@@ -8,13 +8,15 @@
 //! - Balance and nonce updates follow fixed rules. Same sequence of transactions always produces the same state.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use sha2::{Sha256, Digest};
 use crate::error::{PlatariumError, Result};
 use crate::core::asset::Asset;
 use crate::core::contact_escrow::{ContactEscrowEntry, EscrowOutcome};
 use crate::core::transaction::{Transaction, TransactionValidationError};
-use crate::modules::contacteconomy::{contact_default_rules, PURPOSE_CONTACT};
+use crate::modules::contacteconomy::{contact_default_rules, PURPOSE_CONTACT, PURPOSE_DEAL};
+use crate::modules::escrow::deal::{deal_fee_uplp, deal_rules};
 use crate::modules::escrow::rules::{apply_rules, AddressBindings};
 use crate::modules::escrow::types::{
     Escrow, EscrowError, EscrowStatus, NODE_ROLE, RECEIVER_ROLE, SENDER_ROLE, TX_KIND_ESCROW_CANCEL,
@@ -226,6 +228,8 @@ pub struct State {
     nonces: RwLock<Arc<HashMap<Address, u64>>>,
     /// Opaque escrows keyed by escrow_id (generic Escrow Engine).
     contact_escrows: RwLock<Arc<HashMap<String, Escrow>>>,
+    /// Protocol time for deal timeout. Tests and block apply set this; 0 means unset.
+    logical_time: AtomicU64,
 }
 
 impl State {
@@ -235,7 +239,16 @@ impl State {
             uplp_balances: RwLock::new(Arc::new(HashMap::new())),
             nonces: RwLock::new(Arc::new(HashMap::new())),
             contact_escrows: RwLock::new(Arc::new(HashMap::new())),
+            logical_time: AtomicU64::new(0),
         }
+    }
+
+    pub fn set_logical_time(&self, now: u64) {
+        self.logical_time.store(now, Ordering::Relaxed);
+    }
+
+    pub fn logical_time(&self) -> u64 {
+        self.logical_time.load(Ordering::Relaxed)
     }
 
     fn asset_key(address: &Address, asset: &Asset) -> (Address, String) {
@@ -559,6 +572,8 @@ impl State {
             beneficiary: String::new(),
             node: String::new(),
             amount: entry.amount_uplp,
+            peaceful_fee: 0,
+            reserved_fee: 0,
             asset: Asset::PLP.as_canonical(),
             purpose: PURPOSE_CONTACT.to_string(),
             status: entry.status,
@@ -695,7 +710,7 @@ impl State {
     /// Generic escrow_lock.
     /// Validates escrow id uniqueness and balances under one lock set, then atomically
     /// debits and inserts so a failed lock cannot burn fees (C6).
-    /// Binds `beneficiary` / `node` at lock time when rules credit those roles (C5 / R2-H5).
+    /// Binds `beneficiary` and optional `node` at lock time (C5 / R2-H5).
     pub fn escrow_lock(
         &self,
         creator: &Address,
@@ -721,15 +736,37 @@ impl State {
             ))
             .into());
         }
-        let rules = if purpose == PURPOSE_CONTACT {
-            contact_default_rules()
+        let is_deal = purpose == PURPOSE_DEAL;
+        let (rules, peaceful_fee, reserved_fee) = if is_deal {
+            if node.trim().is_empty() {
+                return Err(StateError::Escrow(
+                    EscrowError::InvalidRules("deal lock requires a node".into()).to_string(),
+                )
+                .into());
+            }
+            if asset.as_canonical() != Asset::PLP.as_canonical() {
+                return Err(StateError::Escrow(
+                    EscrowError::InvalidRules("deal lock is PLP only".into()).to_string(),
+                )
+                .into());
+            }
+            let peaceful = deal_fee_uplp(amount, false);
+            let reserved = deal_fee_uplp(amount, true);
+            if amount <= reserved {
+                return Err(StateError::Escrow(
+                    EscrowError::InvalidRules("amount does not cover reserved fee".into()).to_string(),
+                )
+                .into());
+            }
+            (deal_rules(), peaceful, reserved)
+        } else if purpose == PURPOSE_CONTACT {
+            (contact_default_rules(), 0, 0)
         } else {
-            contact_default_rules() // apps may later pass custom rules via tx payload
+            (contact_default_rules(), 0, 0)
         };
         rules
             .validate_outcome("accept")
             .map_err(|e| StateError::Escrow(e.to_string()))?;
-        // C5 / R2-H5: payee/node destinations are fixed at lock for rules that credit them.
         if Self::rules_credit_role(&rules, RECEIVER_ROLE) && beneficiary.trim().is_empty() {
             return Err(StateError::Escrow(
                 EscrowError::MissingBinding(RECEIVER_ROLE.to_string()).to_string(),
@@ -775,6 +812,8 @@ impl State {
                 beneficiary: beneficiary.to_string(),
                 node: node.to_string(),
                 amount,
+                peaceful_fee,
+                reserved_fee,
                 asset: asset.as_canonical(),
                 purpose: purpose.to_string(),
                 status: EscrowStatus::Locked,
@@ -790,7 +829,6 @@ impl State {
     }
 
     /// Legacy wrapper → generic escrow_lock (contact purpose).
-    /// `beneficiary` and `node` are required (contact rules credit receiver/node).
     pub fn lock_contact_escrow(
         &self,
         locker: &Address,
@@ -860,8 +898,6 @@ impl State {
     }
 
     /// Force settle bindings to lock-time payee/node; reject settler redirects (C5 / R2-H5).
-    /// Settler-supplied settle_payee / settle_node are never authoritative: mismatch ⇒ error,
-    /// and an empty lock-time binding cannot be filled by the settler.
     fn bind_settle_addresses(entry: &Escrow, mut bind: AddressBindings) -> Result<AddressBindings> {
         if !bind.sender.is_empty() && bind.sender != entry.creator {
             return Err(StateError::Escrow(
@@ -871,27 +907,27 @@ impl State {
         }
         bind.sender = entry.creator.clone();
 
-        // Receiver: lock-time beneficiary only.
-        if !bind.receiver.is_empty() {
-            if entry.beneficiary.is_empty() || bind.receiver != entry.beneficiary {
+        // Receiver is locked beneficiary when set — ignore settler-supplied settle_payee.
+        if !entry.beneficiary.is_empty() {
+            if !bind.receiver.is_empty() && bind.receiver != entry.beneficiary {
                 return Err(StateError::Escrow(
                     EscrowError::BindingMismatch(RECEIVER_ROLE.to_string()).to_string(),
                 )
                 .into());
             }
+            bind.receiver = entry.beneficiary.clone();
         }
-        bind.receiver = entry.beneficiary.clone();
 
-        // Node: lock-time node only — never allow settler to choose the node-cut.
-        if !bind.node.is_empty() {
-            if entry.node.is_empty() || bind.node != entry.node {
+        // Node cut is locked at lock time when set — ignore settler-supplied settle_node.
+        if !entry.node.is_empty() {
+            if !bind.node.is_empty() && bind.node != entry.node {
                 return Err(StateError::Escrow(
                     EscrowError::BindingMismatch(NODE_ROLE.to_string()).to_string(),
                 )
                 .into());
             }
+            bind.node = entry.node.clone();
         }
-        bind.node = entry.node.clone();
 
         if bind.treasury.is_empty() {
             bind.treasury = TREASURY_ADDRESS.to_string();
@@ -929,6 +965,161 @@ impl State {
         )
     }
 
+    /// Locked deal principal still frozen for the creator. Not part of spendable balance.
+    pub fn deal_locked_uplp(&self, address: &Address) -> u128 {
+        let ce = self.contact_escrows.read().unwrap();
+        ce.values()
+            .filter(|e| {
+                e.purpose == PURPOSE_DEAL
+                    && e.status == EscrowStatus::Locked
+                    && &e.creator == address
+            })
+            .map(|e| e.amount)
+            .sum()
+    }
+
+    /// Open deal principal the beneficiary may receive. Not part of spendable balance.
+    pub fn deal_receivable_uplp(&self, address: &Address) -> u128 {
+        let ce = self.contact_escrows.read().unwrap();
+        ce.values()
+            .filter(|e| {
+                e.purpose == PURPOSE_DEAL
+                    && e.status == EscrowStatus::Locked
+                    && &e.beneficiary == address
+            })
+            .map(|e| e.amount)
+            .sum()
+    }
+
+    fn credit_plp(ab: &mut HashMap<(Address, String), u128>, addr: &str, amt: u128) {
+        if amt == 0 || addr.is_empty() {
+            return;
+        }
+        let k = Self::asset_key(&addr.to_string(), &Asset::PLP);
+        let bal = ab.get(&k).copied().unwrap_or(0);
+        ab.insert(k, bal.saturating_add(amt));
+    }
+
+    /// Deal close: node is paid only `peaceful_fee`. Principal never uses contact shares.
+    fn commit_deal_settle(
+        &self,
+        ab: &mut HashMap<(Address, String), u128>,
+        ub: &mut HashMap<Address, u128>,
+        nonces: &mut HashMap<Address, u64>,
+        ce: &mut HashMap<String, Escrow>,
+        entry: &Escrow,
+        settler: &Address,
+        escrow_id: &str,
+        amount: u128,
+        fee_uplp: u128,
+        auth_key: &str,
+        status_key: &str,
+        bindings: AddressBindings,
+        settle_tx_hash: &str,
+        expected_nonce: Option<u64>,
+    ) -> Result<()> {
+        if settler.as_str() == TREASURY_ADDRESS {
+            return Err(StateError::Escrow(
+                EscrowError::UnauthorizedSettler(auth_key.into()).to_string(),
+            )
+            .into());
+        }
+        if entry.status != EscrowStatus::Locked {
+            return Err(StateError::Escrow(
+                EscrowError::InvalidStatus(entry.status).to_string(),
+            )
+            .into());
+        }
+        if !entry.settle_tx_hash.is_empty() {
+            return Err(StateError::Escrow(EscrowError::Replay.to_string()).into());
+        }
+        if entry.amount != amount {
+            return Err(StateError::Escrow(
+                EscrowError::AmountMismatch {
+                    locked: entry.amount,
+                    got: amount,
+                }
+                .to_string(),
+            )
+            .into());
+        }
+        let _bound = Self::bind_settle_addresses(entry, bindings)?;
+        match auth_key {
+            "accept" => {
+                if entry.beneficiary.is_empty() || settler != &entry.beneficiary {
+                    return Err(StateError::Escrow(
+                        EscrowError::UnauthorizedSettler(auth_key.into()).to_string(),
+                    )
+                    .into());
+                }
+            }
+            "cancel" => {
+                if settler != &entry.creator {
+                    return Err(StateError::Escrow(
+                        EscrowError::UnauthorizedSettler(auth_key.into()).to_string(),
+                    )
+                    .into());
+                }
+            }
+            "timeout" => {
+                if entry.node.is_empty() || settler != &entry.node {
+                    return Err(StateError::Escrow(
+                        EscrowError::UnauthorizedSettler(auth_key.into()).to_string(),
+                    )
+                    .into());
+                }
+                if self.logical_time() <= entry.expires_at {
+                    return Err(StateError::Escrow(
+                        EscrowError::InvalidRules("timeout before expiry".into()).to_string(),
+                    )
+                    .into());
+                }
+            }
+            _ => {
+                return Err(StateError::Escrow(
+                    EscrowError::UnauthorizedSettler(auth_key.into()).to_string(),
+                )
+                .into());
+            }
+        }
+
+        Self::debit_for_escrow_lock_in_maps(
+            ab,
+            ub,
+            nonces,
+            settler,
+            &Asset::PLP,
+            0,
+            fee_uplp,
+            expected_nonce,
+        )?;
+
+        let peaceful = entry.peaceful_fee.min(entry.amount);
+        let rest = entry.amount - peaceful;
+        let new_status = match status_key {
+            "cancel" => EscrowStatus::Cancelled,
+            "timeout" => EscrowStatus::Expired,
+            _ => EscrowStatus::Released,
+        };
+        match auth_key {
+            "cancel" => Self::credit_plp(ab, &entry.creator, entry.amount),
+            "timeout" => {
+                Self::credit_plp(ab, &entry.creator, rest);
+                Self::credit_plp(ab, &entry.node, peaceful);
+            }
+            _ => {
+                Self::credit_plp(ab, &entry.beneficiary, rest);
+                Self::credit_plp(ab, &entry.node, peaceful);
+            }
+        }
+        let stored = ce
+            .get_mut(escrow_id)
+            .ok_or_else(|| StateError::Escrow(EscrowError::NotFound.to_string()))?;
+        stored.settle_tx_hash = settle_tx_hash.to_string();
+        stored.status = new_status;
+        Ok(())
+    }
+
     /// Settle with distinct auth / rules / status keys (cancel may apply reject rules).
     fn escrow_settle_with_auth(
         &self,
@@ -955,8 +1146,28 @@ impl State {
 
         let entry = ce
             .get(escrow_id)
-            .ok_or_else(|| StateError::Escrow(EscrowError::NotFound.to_string()))?;
-        Self::assert_settler_authorized(settler, entry, auth_key)?;
+            .ok_or_else(|| StateError::Escrow(EscrowError::NotFound.to_string()))?
+            .clone();
+        if entry.purpose == PURPOSE_DEAL {
+            return Self::commit_deal_settle(
+                self,
+                ab,
+                ub,
+                nonces,
+                ce,
+                &entry,
+                settler,
+                escrow_id,
+                amount,
+                fee_uplp,
+                auth_key,
+                status_key,
+                bindings,
+                settle_tx_hash,
+                expected_nonce,
+            );
+        }
+        Self::assert_settler_authorized(settler, &entry, auth_key)?;
         if entry.status != EscrowStatus::Locked {
             return Err(StateError::Escrow(
                 EscrowError::InvalidStatus(entry.status).to_string(),
@@ -977,7 +1188,7 @@ impl State {
             .into());
         }
 
-        let bind = Self::bind_settle_addresses(entry, bindings)?;
+        let bind = Self::bind_settle_addresses(&entry, bindings)?;
         let credits = apply_rules(&entry.rules, rules_key, amount, &bind)
             .map_err(|e| StateError::Escrow(e.to_string()))?;
 
@@ -1208,8 +1419,8 @@ impl State {
                 let outcome_key = tx
                     .settle_outcome_key()
                     .map_err(StateError::Escrow)?;
-                // R2-H5 / C5: pass settler fields only for mismatch detection;
-                // `bind_settle_addresses` forces lock-time beneficiary/node.
+                // R2-H5: settler-supplied settle_payee/settle_node are ignored when
+                // lock-time bindings exist (`bind_settle_addresses`).
                 let bindings = AddressBindings {
                     sender: String::new(),
                     receiver: tx.settle_payee.clone().unwrap_or_default(),

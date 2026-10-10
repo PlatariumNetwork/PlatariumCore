@@ -264,6 +264,8 @@ pub fn state_query_json(path: &Path, address: &str, asset: &str) -> Result<Strin
         "nonce": nonce,
         "tokens": tokens,
         "xp": xp,
+        "locked_uplp": state.deal_locked_uplp(&address.to_string()).to_string(),
+        "receivable_uplp": state.deal_receivable_uplp(&address.to_string()).to_string(),
     });
     Ok(serde_json::to_string(&out).map_err(|e| PlatariumError::State(e.to_string()))?)
 }

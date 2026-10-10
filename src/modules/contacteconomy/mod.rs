@@ -6,6 +6,7 @@ use crate::modules::escrow::rules::{EscrowRules, RuleShare};
 use crate::modules::escrow::types::{NODE_ROLE, RECEIVER_ROLE, SENDER_ROLE, TREASURY_ROLE};
 
 pub const PURPOSE_CONTACT: &str = "contact";
+pub use crate::modules::escrow::deal::PURPOSE_DEAL;
 
 pub const OUTCOME_ACCEPT: &str = "accept";
 pub const OUTCOME_TIMEOUT: &str = "timeout";
