@@ -4,7 +4,10 @@
 //! or the `failpoints` Cargo feature. In production builds (neither), every
 //! helper is a compile-time no-op so there is zero runtime cost or arming path.
 
-use crate::error::{PlatariumError, Result};
+use crate::error::Result;
+
+#[cfg(any(test, feature = "failpoints"))]
+use crate::error::PlatariumError;
 
 /// Trip before durable persist begins in [`finalize_to_storage`](super::finalize_contract::finalize_to_storage).
 pub const FP_FINALIZE_BEFORE_PERSIST: &str = "finalize_before_persist";
