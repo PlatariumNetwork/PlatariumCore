@@ -6,7 +6,7 @@ use crate::core::transaction::Transaction;
 use crate::modules::contacteconomy::{contact_default_rules, PURPOSE_CONTACT, PURPOSE_DEAL};
 use crate::modules::escrow::rules::AddressBindings;
 use crate::modules::escrow::types::EscrowStatus;
-use crate::modules::escrow::{deal_rules, Escrow};
+use crate::modules::escrow::{deal_rules, DEAL_PEACEFUL_HOLD, Escrow};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -48,7 +48,35 @@ fn bindings(payee: &str, node: &str) -> AddressBindings {
         node: node.to_string(),
         treasury: TREASURY_ADDRESS.to_string(),
         burn: "burn".into(),
+        volunteer_majority: Vec::new(),
     }
+}
+
+fn majority_bindings(payee: &str, node: &str, keys: &[&str]) -> AddressBindings {
+    let mut b = bindings(payee, node);
+    b.volunteer_majority = keys.iter().map(|k| (*k).to_string()).collect();
+    b
+}
+
+fn confirm_accept(
+    state: &State,
+    who: &str,
+    id: &str,
+    amount: u128,
+    beneficiary: &str,
+    node: &str,
+    hash: &str,
+) -> Result<(), crate::error::PlatariumError> {
+    state.escrow_settle(
+        &who.to_string(),
+        id,
+        amount,
+        0,
+        "accept",
+        bindings(beneficiary, node),
+        hash,
+        None,
+    )
 }
 
 #[test]
@@ -153,23 +181,11 @@ fn empty_node_and_non_plp_and_thin_amount_do_not_debit() {
 }
 
 #[test]
-fn cancel_restores_creator_and_pays_node_nothing() {
+fn cancel_signed_only_by_the_creator_is_rejected() {
     let (state, creator, beneficiary, node) = funded();
     let before = state.get_balance(&creator);
     lock_deal(&state, &creator, &beneficiary, &node, AMOUNT, "d-cancel");
     assert!(state
-        .escrow_settle(
-            &beneficiary,
-            "d-cancel",
-            AMOUNT,
-            0,
-            "cancel",
-            bindings(&beneficiary, &node),
-            "nope",
-            None,
-        )
-        .is_err());
-    state
         .escrow_settle(
             &creator,
             "d-cancel",
@@ -180,93 +196,79 @@ fn cancel_restores_creator_and_pays_node_nothing() {
             "ok",
             None,
         )
-        .unwrap();
-    assert_eq!(state.get_balance(&creator), before);
+        .is_err());
+    assert_eq!(state.get_balance(&creator), before - AMOUNT);
     assert_eq!(state.get_balance(&node), 0);
-    assert_eq!(state.get_escrow("d-cancel").unwrap().status, EscrowStatus::Cancelled);
-    assert_eq!(state.deal_locked_uplp(&creator), 0);
-    assert_eq!(state.deal_receivable_uplp(&beneficiary), 0);
+    assert_eq!(state.get_escrow("d-cancel").unwrap().status, EscrowStatus::Locked);
+    assert_eq!(state.deal_locked_uplp(&creator), AMOUNT);
 }
 
 #[test]
-fn accept_pays_peaceful_fee_and_drops_views() {
+fn one_confirmation_does_not_close_or_pay() {
     let (state, creator, beneficiary, node) = funded();
     lock_deal(&state, &creator, &beneficiary, &node, AMOUNT, "d-acc");
     let node_before = state.get_balance(&node);
     let ben_before = state.get_balance(&beneficiary);
-    assert!(state
-        .escrow_settle(
-            &creator,
-            "d-acc",
-            AMOUNT,
-            0,
-            "accept",
-            bindings(&beneficiary, &node),
-            "creator",
-            None,
-        )
-        .is_err());
-    assert_eq!(state.get_escrow("d-acc").unwrap().status, EscrowStatus::Locked);
-    assert!(state
-        .escrow_settle(
-            &node,
-            "d-acc",
-            AMOUNT,
-            0,
-            "accept",
-            bindings(&beneficiary, &node),
-            "node",
-            None,
-        )
-        .is_err());
-    assert_eq!(state.get_balance(&node), node_before);
-    assert!(state
-        .escrow_settle(
-            &TREASURY_ADDRESS.to_string(),
-            "d-acc",
-            AMOUNT,
-            0,
-            "accept",
-            bindings(&beneficiary, &node),
-            "treasury",
-            None,
-        )
-        .is_err());
-    state
-        .escrow_settle(
-            &beneficiary,
-            "d-acc",
-            AMOUNT,
-            0,
-            "accept",
-            bindings(&beneficiary, &node),
-            "yes",
-            None,
-        )
-        .unwrap();
-    assert_eq!(state.get_balance(&node), node_before + PEACEFUL);
-    assert_eq!(state.get_balance(&beneficiary), ben_before + (AMOUNT - PEACEFUL));
-    assert_eq!(
-        state.get_balance(&node) + state.get_balance(&beneficiary),
-        AMOUNT
-    );
+    let creator_after_lock = state.get_balance(&creator);
+    confirm_accept(&state, &creator, "d-acc", AMOUNT, &beneficiary, &node, "creator").unwrap();
     let e = state.get_escrow("d-acc").unwrap();
-    assert_eq!(e.status, EscrowStatus::Released);
+    assert!(e.creator_confirmed);
+    assert!(!e.beneficiary_confirmed);
+    assert_eq!(e.status, EscrowStatus::Locked);
+    assert_eq!(state.get_balance(&creator), creator_after_lock);
+    assert_eq!(state.get_balance(&node), node_before);
+    assert_eq!(state.get_balance(&beneficiary), ben_before);
+    assert!(confirm_accept(&state, &node, "d-acc", AMOUNT, &beneficiary, &node, "node").is_err());
+    assert!(confirm_accept(
+        &state,
+        TREASURY_ADDRESS,
+        "d-acc",
+        AMOUNT,
+        &beneficiary,
+        &node,
+        "treasury",
+    )
+    .is_err());
+    confirm_accept(&state, &beneficiary, "d-acc", AMOUNT, &beneficiary, &node, "ben").unwrap();
+    let e = state.get_escrow("d-acc").unwrap();
+    assert!(e.beneficiary_confirmed);
+    assert_eq!(e.status, EscrowStatus::Locked);
+    assert_eq!(state.get_balance(&node), node_before);
+    assert_eq!(state.get_balance(&beneficiary), ben_before);
+}
+
+#[test]
+fn mutual_confirm_pays_after_hold_and_not_before() {
+    let (state, creator, beneficiary, node) = funded();
+    lock_deal(&state, &creator, &beneficiary, &node, AMOUNT, "d-hold");
+    confirm_accept(&state, &creator, "d-hold", AMOUNT, &beneficiary, &node, "c").unwrap();
+    state.set_logical_time(10);
+    confirm_accept(&state, &beneficiary, "d-hold", AMOUNT, &beneficiary, &node, "b").unwrap();
+    assert_eq!(state.get_escrow("d-hold").unwrap().pending_close_at, 10);
+    assert_eq!(state.get_balance(&node), 0);
+    state.set_logical_time(10 + DEAL_PEACEFUL_HOLD - 1);
+    assert!(confirm_accept(&state, &beneficiary, "d-hold", AMOUNT, &beneficiary, &node, "early").is_err());
+    assert_eq!(state.get_escrow("d-hold").unwrap().status, EscrowStatus::Locked);
+    state.set_logical_time(10 + DEAL_PEACEFUL_HOLD);
+    confirm_accept(&state, &beneficiary, "d-hold", AMOUNT, &beneficiary, &node, "pay").unwrap();
+    assert_eq!(state.get_balance(&node), PEACEFUL);
+    assert_eq!(state.get_balance(&beneficiary), AMOUNT - PEACEFUL);
+    assert_eq!(state.get_escrow("d-hold").unwrap().status, EscrowStatus::Released);
     assert_eq!(state.deal_locked_uplp(&creator), 0);
-    assert_eq!(state.deal_receivable_uplp(&beneficiary), 0);
-    assert!(state
-        .escrow_settle(
-            &beneficiary,
-            "d-acc",
-            AMOUNT,
-            0,
-            "accept",
-            bindings(&beneficiary, &node),
-            "again",
-            None,
-        )
-        .is_err());
-    assert_eq!(state.get_balance(&node), node_before + PEACEFUL);
+    assert!(confirm_accept(&state, &beneficiary, "d-hold", AMOUNT, &beneficiary, &node, "again").is_err());
+}
+
+#[test]
+fn confirmation_after_expiry_still_does_not_close() {
+    let (state, creator, beneficiary, node) = funded();
+    lock_deal(&state, &creator, &beneficiary, &node, AMOUNT, "d-exp");
+    state.set_logical_time(2_000);
+    confirm_accept(&state, &beneficiary, "d-exp", AMOUNT, &beneficiary, &node, "late").unwrap();
+    let e = state.get_escrow("d-exp").unwrap();
+    assert!(e.beneficiary_confirmed);
+    assert_eq!(e.status, EscrowStatus::Locked);
+    assert_eq!(state.get_balance(&node), 0);
+    assert_eq!(state.get_balance(&beneficiary), 0);
 }
 
 #[test]
@@ -314,7 +316,7 @@ fn redirect_and_timeout_rules() {
         .is_err());
     assert_eq!(state.get_balance(&creator), before_c);
     state.set_logical_time(1_001);
-    state
+    assert!(state
         .escrow_settle(
             &node,
             "d-to",
@@ -325,10 +327,13 @@ fn redirect_and_timeout_rules() {
             "late",
             None,
         )
-        .unwrap();
-    assert_eq!(state.get_balance(&creator), before_c + (AMOUNT - PEACEFUL));
-    assert_eq!(state.get_balance(&node), PEACEFUL);
-    assert_eq!(state.get_escrow("d-to").unwrap().status, EscrowStatus::Expired);
+        .is_err());
+    assert_eq!(state.get_balance(&creator), before_c);
+    assert_eq!(state.get_balance(&node), 0);
+    assert_eq!(state.get_escrow("d-to").unwrap().status, EscrowStatus::Locked);
+    confirm_accept(&state, &creator, "d-to", AMOUNT, &beneficiary, &node, "one").unwrap();
+    assert_eq!(state.get_escrow("d-to").unwrap().status, EscrowStatus::Locked);
+    assert_eq!(state.get_balance(&node), 0);
 }
 
 #[test]
@@ -438,4 +443,108 @@ fn treasury_can_still_settle_contact() {
         )
         .unwrap();
     assert_eq!(state.get_escrow("contact-1").unwrap().status, EscrowStatus::Released);
+}
+
+const RESERVED: u128 = 64_000_000;
+const PREMIUM: u128 = 32_000_000;
+
+fn dispute(
+    state: &State,
+    who: &str,
+    id: &str,
+    key: &str,
+    keys: &[&str],
+    beneficiary: &str,
+    node: &str,
+    hash: &str,
+) -> Result<(), crate::error::PlatariumError> {
+    state.escrow_settle(
+        &who.to_string(),
+        id,
+        AMOUNT,
+        0,
+        key,
+        majority_bindings(beneficiary, node, keys),
+        hash,
+        None,
+    )
+}
+
+#[test]
+fn dispute_fulfilled_pays_peaceful_fee_and_splits_premium() {
+    let (state, creator, beneficiary, node) = funded();
+    lock_deal(&state, &creator, &beneficiary, &node, AMOUNT, "d-ful");
+    let keys = ["v2", "v1", "v3"];
+    assert!(dispute(
+        &state, &node, "d-ful", "dispute-fulfilled", &keys, &beneficiary, &node, "node",
+    )
+    .is_err());
+    dispute(
+        &state, &beneficiary, "d-ful", "dispute-fulfilled", &keys, &beneficiary, &node, "open",
+    )
+    .unwrap();
+    assert_eq!(state.get_escrow("d-ful").unwrap().status, EscrowStatus::Locked);
+    assert_eq!(state.get_balance(&node), 0);
+    state.set_logical_time(DEAL_PEACEFUL_HOLD - 1);
+    assert!(dispute(
+        &state, &creator, "d-ful", "dispute-fulfilled", &keys, &beneficiary, &node, "early",
+    )
+    .is_err());
+    state.set_logical_time(DEAL_PEACEFUL_HOLD);
+    dispute(
+        &state, &creator, "d-ful", "dispute-fulfilled", &keys, &beneficiary, &node, "pay",
+    )
+    .unwrap();
+    assert_eq!(state.get_balance(&node), PEACEFUL);
+    assert_eq!(state.get_balance(&beneficiary), AMOUNT - RESERVED);
+    assert_eq!(state.get_balance(&"v1".to_string()) + state.get_balance(&"v2".to_string()) + state.get_balance(&"v3".to_string()), PREMIUM);
+    assert_eq!(state.get_balance(&"v1".to_string()), PREMIUM / 3 + 1);
+    assert_eq!(state.get_balance(&"v3".to_string()), PREMIUM / 3);
+    assert_eq!(state.get_escrow("d-ful").unwrap().status, EscrowStatus::Released);
+    assert_eq!(state.deal_receivable_uplp(&beneficiary), 0);
+}
+
+#[test]
+fn five_matching_volunteers_share_the_same_premium() {
+    let (state, creator, beneficiary, node) = funded();
+    lock_deal(&state, &creator, &beneficiary, &node, AMOUNT, "d-five");
+    let keys = ["a", "b", "c", "d", "e"];
+    dispute(
+        &state, &creator, "d-five", "dispute-fulfilled", &keys, &beneficiary, &node, "open",
+    )
+    .unwrap();
+    state.set_logical_time(DEAL_PEACEFUL_HOLD);
+    dispute(
+        &state, &creator, "d-five", "dispute-fulfilled", &keys, &beneficiary, &node, "pay",
+    )
+    .unwrap();
+    let mut sum = 0u128;
+    for k in keys {
+        sum += state.get_balance(&k.to_string());
+    }
+    assert_eq!(sum, PREMIUM);
+    assert_eq!(state.get_balance(&node), PEACEFUL);
+}
+
+#[test]
+fn dispute_not_fulfilled_refunds_creator_minus_reserved() {
+    let (state, creator, beneficiary, node) = funded();
+    let before = state.get_balance(&creator);
+    lock_deal(&state, &creator, &beneficiary, &node, AMOUNT, "d-nf");
+    let keys = ["m1", "m2", "m3"];
+    assert!(dispute(
+        &state, &creator, "d-nf", "dispute-not-fulfilled", &keys, &beneficiary, &node, "self",
+    )
+    .is_ok());
+    assert_eq!(state.get_balance(&creator), before - AMOUNT);
+    state.set_logical_time(DEAL_PEACEFUL_HOLD);
+    dispute(
+        &state, &beneficiary, "d-nf", "dispute-not-fulfilled", &keys, &beneficiary, &node, "pay",
+    )
+    .unwrap();
+    assert_eq!(state.get_balance(&node), PEACEFUL);
+    assert_eq!(state.get_balance(&creator), before - RESERVED);
+    assert_eq!(state.get_balance(&beneficiary), 0);
+    assert_eq!(state.get_escrow("d-nf").unwrap().status, EscrowStatus::Refunded);
+    assert_eq!(state.deal_receivable_uplp(&beneficiary), 0);
 }

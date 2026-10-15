@@ -16,7 +16,9 @@ use crate::core::asset::Asset;
 use crate::core::contact_escrow::{ContactEscrowEntry, EscrowOutcome};
 use crate::core::transaction::{Transaction, TransactionValidationError};
 use crate::modules::contacteconomy::{contact_default_rules, PURPOSE_CONTACT, PURPOSE_DEAL};
-use crate::modules::escrow::deal::{deal_fee_uplp, deal_rules};
+use crate::modules::escrow::deal::{
+    deal_fee_uplp, deal_rules, split_volunteer_premium, DEAL_PEACEFUL_HOLD,
+};
 use crate::modules::escrow::rules::{apply_rules, AddressBindings};
 use crate::modules::escrow::types::{
     Escrow, EscrowError, EscrowStatus, NODE_ROLE, RECEIVER_ROLE, SENDER_ROLE, TX_KIND_ESCROW_CANCEL,
@@ -583,6 +585,12 @@ impl State {
             expires_at: 0,
             lock_tx_hash: String::new(),
             settle_tx_hash: String::new(),
+            creator_confirmed: false,
+            beneficiary_confirmed: false,
+            pending_close_at: 0,
+            pending_outcome: String::new(),
+            appealed: false,
+            volunteer_majority: Vec::new(),
         });
     }
 
@@ -823,6 +831,12 @@ impl State {
                 expires_at,
                 lock_tx_hash: lock_tx_hash.to_string(),
                 settle_tx_hash: String::new(),
+                creator_confirmed: false,
+                beneficiary_confirmed: false,
+                pending_close_at: 0,
+                pending_outcome: String::new(),
+                appealed: false,
+                volunteer_majority: Vec::new(),
             },
         );
         Ok(())
@@ -1000,6 +1014,45 @@ impl State {
         ab.insert(k, bal.saturating_add(amt));
     }
 
+    fn deal_hold_elapsed(now: u64, pending_close_at: u64, outcome: &str) -> bool {
+        !outcome.is_empty() && now >= pending_close_at.saturating_add(DEAL_PEACEFUL_HOLD)
+    }
+
+    fn deal_party(entry: &Escrow, settler: &Address) -> bool {
+        settler == &entry.creator || settler == &entry.beneficiary
+    }
+
+    fn apply_deal_credits(
+        ab: &mut HashMap<(Address, String), u128>,
+        entry: &Escrow,
+        outcome: &str,
+    ) {
+        let peaceful = entry.peaceful_fee.min(entry.amount);
+        let reserved = entry.reserved_fee.min(entry.amount).max(peaceful);
+        let premium = reserved.saturating_sub(peaceful);
+        match outcome {
+            "accept" => {
+                Self::credit_plp(ab, &entry.node, peaceful);
+                Self::credit_plp(ab, &entry.beneficiary, entry.amount - peaceful);
+            }
+            "dispute-fulfilled" => {
+                Self::credit_plp(ab, &entry.node, peaceful);
+                for (k, n) in split_volunteer_premium(premium, &entry.volunteer_majority) {
+                    Self::credit_plp(ab, &k, n);
+                }
+                Self::credit_plp(ab, &entry.beneficiary, entry.amount - reserved);
+            }
+            "dispute-not-fulfilled" => {
+                Self::credit_plp(ab, &entry.node, peaceful);
+                for (k, n) in split_volunteer_premium(premium, &entry.volunteer_majority) {
+                    Self::credit_plp(ab, &k, n);
+                }
+                Self::credit_plp(ab, &entry.creator, entry.amount - reserved);
+            }
+            _ => {}
+        }
+    }
+
     /// Deal close: node is paid only `peaceful_fee`. Principal never uses contact shares.
     fn commit_deal_settle(
         &self,
@@ -1013,7 +1066,7 @@ impl State {
         amount: u128,
         fee_uplp: u128,
         auth_key: &str,
-        status_key: &str,
+        _status_key: &str,
         bindings: AddressBindings,
         settle_tx_hash: &str,
         expected_nonce: Option<u64>,
@@ -1043,34 +1096,36 @@ impl State {
             )
             .into());
         }
-        let _bound = Self::bind_settle_addresses(entry, bindings)?;
+        let bound = Self::bind_settle_addresses(entry, bindings)?;
+        if !entry.node.is_empty() && settler == &entry.node {
+            return Err(StateError::Escrow(
+                EscrowError::UnauthorizedSettler(auth_key.into()).to_string(),
+            )
+            .into());
+        }
+
         match auth_key {
+            "cancel" | "timeout" => {
+                return Err(StateError::Escrow(
+                    EscrowError::InvalidRules(
+                        "a deal does not close on one signature or on expiry".into(),
+                    )
+                    .to_string(),
+                )
+                .into());
+            }
             "accept" => {
-                if entry.beneficiary.is_empty() || settler != &entry.beneficiary {
+                if !Self::deal_party(entry, settler) {
                     return Err(StateError::Escrow(
                         EscrowError::UnauthorizedSettler(auth_key.into()).to_string(),
                     )
                     .into());
                 }
             }
-            "cancel" => {
-                if settler != &entry.creator {
+            "dispute-fulfilled" | "dispute-not-fulfilled" => {
+                if !Self::deal_party(entry, settler) {
                     return Err(StateError::Escrow(
                         EscrowError::UnauthorizedSettler(auth_key.into()).to_string(),
-                    )
-                    .into());
-                }
-            }
-            "timeout" => {
-                if entry.node.is_empty() || settler != &entry.node {
-                    return Err(StateError::Escrow(
-                        EscrowError::UnauthorizedSettler(auth_key.into()).to_string(),
-                    )
-                    .into());
-                }
-                if self.logical_time() <= entry.expires_at {
-                    return Err(StateError::Escrow(
-                        EscrowError::InvalidRules("timeout before expiry".into()).to_string(),
                     )
                     .into());
                 }
@@ -1081,6 +1136,70 @@ impl State {
                 )
                 .into());
             }
+        }
+
+        let stored = ce
+            .get_mut(escrow_id)
+            .ok_or_else(|| StateError::Escrow(EscrowError::NotFound.to_string()))?;
+        let now = self.logical_time();
+
+        if auth_key == "accept" {
+            if settler == &stored.creator {
+                stored.creator_confirmed = true;
+            }
+            if settler == &stored.beneficiary {
+                stored.beneficiary_confirmed = true;
+            }
+            if !(stored.creator_confirmed && stored.beneficiary_confirmed) {
+                Self::debit_for_escrow_lock_in_maps(
+                    ab, ub, nonces, settler, &Asset::PLP, 0, fee_uplp, expected_nonce,
+                )?;
+                return Ok(());
+            }
+            if stored.pending_outcome.is_empty() {
+                stored.pending_close_at = now;
+                stored.pending_outcome = "accept".into();
+                Self::debit_for_escrow_lock_in_maps(
+                    ab, ub, nonces, settler, &Asset::PLP, 0, fee_uplp, expected_nonce,
+                )?;
+                return Ok(());
+            }
+        } else {
+            if stored.pending_outcome.is_empty() {
+                let mut keys = bound.volunteer_majority.clone();
+                keys.sort();
+                keys.dedup();
+                keys.retain(|k| !k.is_empty());
+                if keys.len() < 3 {
+                    return Err(StateError::Escrow(
+                        EscrowError::InvalidRules("dispute needs three matching volunteers".into())
+                            .to_string(),
+                    )
+                    .into());
+                }
+                stored.volunteer_majority = keys;
+                stored.pending_close_at = now;
+                stored.pending_outcome = auth_key.to_string();
+                Self::debit_for_escrow_lock_in_maps(
+                    ab, ub, nonces, settler, &Asset::PLP, 0, fee_uplp, expected_nonce,
+                )?;
+                return Ok(());
+            }
+            if stored.pending_outcome != auth_key {
+                return Err(StateError::Escrow(
+                    EscrowError::InvalidRules("pending outcome mismatch".into()).to_string(),
+                )
+                .into());
+            }
+        }
+
+        if stored.appealed
+            || !Self::deal_hold_elapsed(now, stored.pending_close_at, &stored.pending_outcome)
+        {
+            return Err(StateError::Escrow(
+                EscrowError::InvalidRules("peaceful hold is still open".into()).to_string(),
+            )
+            .into());
         }
 
         Self::debit_for_escrow_lock_in_maps(
@@ -1094,29 +1213,15 @@ impl State {
             expected_nonce,
         )?;
 
-        let peaceful = entry.peaceful_fee.min(entry.amount);
-        let rest = entry.amount - peaceful;
-        let new_status = match status_key {
-            "cancel" => EscrowStatus::Cancelled,
-            "timeout" => EscrowStatus::Expired,
-            _ => EscrowStatus::Released,
-        };
-        match auth_key {
-            "cancel" => Self::credit_plp(ab, &entry.creator, entry.amount),
-            "timeout" => {
-                Self::credit_plp(ab, &entry.creator, rest);
-                Self::credit_plp(ab, &entry.node, peaceful);
-            }
-            _ => {
-                Self::credit_plp(ab, &entry.beneficiary, rest);
-                Self::credit_plp(ab, &entry.node, peaceful);
-            }
-        }
-        let stored = ce
-            .get_mut(escrow_id)
-            .ok_or_else(|| StateError::Escrow(EscrowError::NotFound.to_string()))?;
+        let outcome = stored.pending_outcome.clone();
+        let snapshot = stored.clone();
+        Self::apply_deal_credits(ab, &snapshot, &outcome);
         stored.settle_tx_hash = settle_tx_hash.to_string();
-        stored.status = new_status;
+        stored.status = if outcome == "dispute-not-fulfilled" {
+            EscrowStatus::Refunded
+        } else {
+            EscrowStatus::Released
+        };
         Ok(())
     }
 
@@ -1244,6 +1349,7 @@ impl State {
             node: node_operator.to_string(),
             treasury: TREASURY_ADDRESS.to_string(),
             burn: "burn".to_string(),
+                    volunteer_majority: Vec::new(),
         };
         self.escrow_settle(
             settler,
@@ -1282,6 +1388,7 @@ impl State {
             node: locked_node,
             treasury: TREASURY_ADDRESS.to_string(),
             burn: "burn".to_string(),
+                    volunteer_majority: Vec::new(),
         };
         // Prefer reject rules if present; else credit 100% to creator.
         if entry.rules.outcomes.contains_key("reject") {
@@ -1369,6 +1476,7 @@ impl State {
             node: locked_node,
             treasury: TREASURY_ADDRESS.to_string(),
             burn: "burn".to_string(),
+                    volunteer_majority: Vec::new(),
         };
         self.escrow_settle_with_auth(
             settler,
@@ -1427,7 +1535,8 @@ impl State {
                     node: tx.settle_node.clone().unwrap_or_default(),
                     treasury: TREASURY_ADDRESS.to_string(),
                     burn: "burn".to_string(),
-                };
+                            volunteer_majority: Vec::new(),
+        };
                 self.escrow_settle(
                     &tx.from,
                     rid,

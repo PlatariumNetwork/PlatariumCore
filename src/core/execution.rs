@@ -204,7 +204,8 @@ impl ExecutionLogic {
                     node: tx.settle_node.clone().unwrap_or_default(),
                     treasury: TREASURY_ADDRESS.to_string(),
                     burn: "burn".to_string(),
-                };
+                            volunteer_majority: Vec::new(),
+        };
                 state.escrow_settle(
                     &tx.from,
                     rid,

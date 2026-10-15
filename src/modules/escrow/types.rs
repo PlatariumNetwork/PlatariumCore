@@ -78,6 +78,24 @@ pub struct Escrow {
     pub expires_at: u64,
     pub lock_tx_hash: String,
     pub settle_tx_hash: String,
+    /// Creator recorded that the conditions are fulfilled.
+    #[serde(default)]
+    pub creator_confirmed: bool,
+    /// Beneficiary recorded that the conditions are fulfilled.
+    #[serde(default)]
+    pub beneficiary_confirmed: bool,
+    /// Logical time when both parties confirmed or a first-instance verdict was recorded. 0 = none.
+    #[serde(default)]
+    pub pending_close_at: u64,
+    /// `accept`, `dispute-fulfilled`, or `dispute-not-fulfilled`.
+    #[serde(default)]
+    pub pending_outcome: String,
+    /// An appeal is on file; credits stay blocked.
+    #[serde(default)]
+    pub appealed: bool,
+    /// Volunteer keys that revealed the standing first-instance word, lexicographic at pay time.
+    #[serde(default)]
+    pub volunteer_majority: Vec<String>,
 }
 
 #[derive(Error, Debug, Clone, PartialEq, Eq)]

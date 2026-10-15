@@ -69,6 +69,33 @@ pub fn deal_fee_uplp(amount: u128, disputed: bool) -> u128 {
     }
 }
 
+/// Mutual-confirm and first-instance verdict credits wait this many logical-time units.
+pub const DEAL_PEACEFUL_HOLD: u64 = 86_400;
+
+/// Split `premium` among majority keys. Remainder μPLP goes one at a time in sort order.
+pub fn split_volunteer_premium(premium: u128, keys: &[String]) -> Vec<(String, u128)> {
+    let mut ks: Vec<String> = keys
+        .iter()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .collect();
+    ks.sort();
+    ks.dedup();
+    if ks.is_empty() || premium == 0 {
+        return Vec::new();
+    }
+    let n = ks.len() as u128;
+    let share = premium / n;
+    let rem = premium % n;
+    ks.into_iter()
+        .enumerate()
+        .map(|(i, k)| {
+            let extra = if (i as u128) < rem { 1 } else { 0 };
+            (k, share + extra)
+        })
+        .collect()
+}
+
 /// Settlement marker. Accept credits are applied from `peaceful_fee`, not these percents.
 pub fn deal_rules() -> EscrowRules {
     EscrowRules::new()
@@ -153,5 +180,24 @@ mod tests {
     #[test]
     fn deal_rules_hash_differs_from_contact() {
         assert_ne!(deal_rules().hash_hex(), contact_default_rules().hash_hex());
+    }
+
+    #[test]
+    fn leftover_micro_goes_lexicographic() {
+        let keys = vec!["c".into(), "a".into(), "b".into()];
+        let parts = split_volunteer_premium(32, &keys);
+        assert_eq!(
+            parts,
+            vec![
+                ("a".into(), 11u128),
+                ("b".into(), 11u128),
+                ("c".into(), 10u128),
+            ]
+        );
+        let five = vec!["e".into(), "d".into(), "c".into(), "b".into(), "a".into()];
+        let parts5 = split_volunteer_premium(32, &five);
+        assert_eq!(parts5.iter().map(|(_, n)| *n).sum::<u128>(), 32);
+        assert_eq!(parts5[0], ("a".into(), 7));
+        assert_eq!(parts5[4], ("e".into(), 6));
     }
 }
