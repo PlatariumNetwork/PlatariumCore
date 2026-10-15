@@ -14,44 +14,30 @@ struct Bracket {
     bps: u32,
 }
 
-/// First 100 PLP at 50 bps, next 900 at 100, next 9000 at 150, rest at 200.
+/// First 1,000 PLP at 180 bps, next 9,000 at 160, next 90,000 at 140,
+/// next 900,000 at 120, remainder at 100.
 fn peaceful_brackets() -> &'static [Bracket] {
-    const W100: u128 = 100 * MICRO_PLP_PER_PLP;
-    const W900: u128 = 900 * MICRO_PLP_PER_PLP;
-    const W9000: u128 = 9000 * MICRO_PLP_PER_PLP;
+    const W1K: u128 = 1_000 * MICRO_PLP_PER_PLP;
+    const W9K: u128 = 9_000 * MICRO_PLP_PER_PLP;
+    const W90K: u128 = 90_000 * MICRO_PLP_PER_PLP;
+    const W900K: u128 = 900_000 * MICRO_PLP_PER_PLP;
     &[
-        Bracket { width: Some(W100), bps: 50 },
-        Bracket { width: Some(W900), bps: 100 },
-        Bracket { width: Some(W9000), bps: 150 },
-        Bracket { width: None, bps: 200 },
+        Bracket { width: Some(W1K), bps: 180 },
+        Bracket { width: Some(W9K), bps: 160 },
+        Bracket { width: Some(W90K), bps: 140 },
+        Bracket { width: Some(W900K), bps: 120 },
+        Bracket { width: None, bps: 100 },
     ]
 }
 
-fn dispute_brackets() -> &'static [Bracket] {
-    const W100: u128 = 100 * MICRO_PLP_PER_PLP;
-    const W900: u128 = 900 * MICRO_PLP_PER_PLP;
-    const W9000: u128 = 9000 * MICRO_PLP_PER_PLP;
-    &[
-        Bracket { width: Some(W100), bps: 100 },
-        Bracket { width: Some(W900), bps: 200 },
-        Bracket { width: Some(W9000), bps: 300 },
-        Bracket { width: None, bps: 400 },
-    ]
-}
-
-/// Integer marginal fee. A positive amount that rounds to 0 still costs 1 μPLP.
+/// Integer marginal peaceful fee. Dispute fee is exactly twice that after rounding.
 pub fn deal_fee_uplp(amount: u128, disputed: bool) -> u128 {
     if amount == 0 {
         return 0;
     }
-    let table = if disputed {
-        dispute_brackets()
-    } else {
-        peaceful_brackets()
-    };
     let mut left = amount;
     let mut fee = 0u128;
-    for b in table {
+    for b in peaceful_brackets() {
         if left == 0 {
             break;
         }
@@ -63,7 +49,10 @@ pub fn deal_fee_uplp(amount: u128, disputed: bool) -> u128 {
         left -= slice;
     }
     if fee == 0 {
-        1
+        fee = 1;
+    }
+    if disputed {
+        fee.saturating_mul(2)
     } else {
         fee
     }
@@ -134,17 +123,20 @@ mod tests {
     }
 
     #[test]
-    fn dispute_rates_are_double_and_capped() {
-        let p = peaceful_brackets();
-        let d = dispute_brackets();
-        assert_eq!(p.len(), d.len());
-        for (a, b) in p.iter().zip(d.iter()) {
-            assert_eq!(a.width, b.width);
-            assert_eq!(b.bps, a.bps * 2);
-        }
-        assert_eq!(d.last().unwrap().bps, 400);
-        let width_sum: u128 = p.iter().filter_map(|b| b.width).sum();
-        assert_eq!(width_sum, 10_000 * MICRO_PLP_PER_PLP);
+    fn dispute_fee_is_twice_rounded_peaceful() {
+        let amount = 2_500 * MICRO_PLP_PER_PLP;
+        let peaceful = deal_fee_uplp(amount, false);
+        assert_eq!(peaceful, 42 * MICRO_PLP_PER_PLP);
+        assert_eq!(deal_fee_uplp(amount, true), peaceful * 2);
+        assert_eq!(deal_fee_uplp(amount, true), 84 * MICRO_PLP_PER_PLP);
+        let million = 1_000_000 * MICRO_PLP_PER_PLP;
+        let just_over = million + MICRO_PLP_PER_PLP;
+        let fee_m = deal_fee_uplp(million, false);
+        let fee_over = deal_fee_uplp(just_over, false);
+        assert_eq!(fee_over - fee_m, 1 * 100 / 10_000);
+        let one_k = 1_000 * MICRO_PLP_PER_PLP;
+        let ten_k = 10_000 * MICRO_PLP_PER_PLP;
+        assert!(deal_fee_uplp(ten_k, false) < deal_fee_uplp(one_k, false) * 10);
     }
 
     #[test]
@@ -156,23 +148,23 @@ mod tests {
     #[test]
     fn peaceful_and_dispute_fee_for_2500_plp() {
         let amount = 2_500_000_000u128;
-        assert_eq!(deal_fee_uplp(amount, false), 32_000_000);
-        assert_eq!(deal_fee_uplp(amount, true), 64_000_000);
+        assert_eq!(deal_fee_uplp(amount, false), 42_000_000);
+        assert_eq!(deal_fee_uplp(amount, true), 84_000_000);
     }
 
     #[test]
     fn one_micro_floors_to_one() {
         assert_eq!(deal_fee_uplp(1, false), 1);
-        assert_eq!(deal_fee_uplp(1, true), 1);
+        assert_eq!(deal_fee_uplp(1, true), 2);
     }
 
     #[test]
     fn bracket_does_not_reprice_the_whole_amount() {
-        let at = 100 * MICRO_PLP_PER_PLP;
+        let at = 1_000 * MICRO_PLP_PER_PLP;
         let fee_at = deal_fee_uplp(at, false);
         let fee_next = deal_fee_uplp(at + 1, false);
-        let step = 1u128 * 100 / 10_000;
-        assert_eq!(fee_at, at * 50 / 10_000);
+        let step = 1u128 * 160 / 10_000;
+        assert_eq!(fee_at, at * 180 / 10_000);
         assert_eq!(fee_next, fee_at + step);
         assert!(fee_next - fee_at <= step);
     }

@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 const AMOUNT: u128 = 2_500_000_000;
-const PEACEFUL: u128 = 32_000_000;
+const PEACEFUL: u128 = 42_000_000;
 
 fn funded() -> (State, String, String, String) {
     let state = State::new();
@@ -86,7 +86,7 @@ fn deal_lock_stores_fees_and_not_contact_rules() {
     lock_deal(&state, &creator, &beneficiary, &node, AMOUNT, "d1");
     let e = state.get_escrow("d1").unwrap();
     assert_eq!(e.peaceful_fee, PEACEFUL);
-    assert_eq!(e.reserved_fee, 64_000_000);
+    assert_eq!(e.reserved_fee, 84_000_000);
     assert_ne!(e.rules_hash, contact_default_rules().hash_hex());
     assert_eq!(e.rules_hash, deal_rules().hash_hex());
     assert_eq!(state.get_balance(&creator), before - AMOUNT);
@@ -445,8 +445,8 @@ fn treasury_can_still_settle_contact() {
     assert_eq!(state.get_escrow("contact-1").unwrap().status, EscrowStatus::Released);
 }
 
-const RESERVED: u128 = 64_000_000;
-const PREMIUM: u128 = 32_000_000;
+const RESERVED: u128 = 84_000_000;
+const PREMIUM: u128 = 42_000_000;
 
 fn dispute(
     state: &State,
@@ -498,7 +498,7 @@ fn dispute_fulfilled_pays_peaceful_fee_and_splits_premium() {
     assert_eq!(state.get_balance(&node), PEACEFUL);
     assert_eq!(state.get_balance(&beneficiary), AMOUNT - RESERVED);
     assert_eq!(state.get_balance(&"v1".to_string()) + state.get_balance(&"v2".to_string()) + state.get_balance(&"v3".to_string()), PREMIUM);
-    assert_eq!(state.get_balance(&"v1".to_string()), PREMIUM / 3 + 1);
+    assert_eq!(state.get_balance(&"v1".to_string()), PREMIUM / 3);
     assert_eq!(state.get_balance(&"v3".to_string()), PREMIUM / 3);
     assert_eq!(state.get_escrow("d-ful").unwrap().status, EscrowStatus::Released);
     assert_eq!(state.deal_receivable_uplp(&beneficiary), 0);
@@ -547,4 +547,31 @@ fn dispute_not_fulfilled_refunds_creator_minus_reserved() {
     assert_eq!(state.get_balance(&beneficiary), 0);
     assert_eq!(state.get_escrow("d-nf").unwrap().status, EscrowStatus::Refunded);
     assert_eq!(state.deal_receivable_uplp(&beneficiary), 0);
+}
+
+#[test]
+fn expiry_block_leaves_the_deal_locked() {
+    let (state, creator, beneficiary, node) = funded();
+    lock_deal(&state, &creator, &beneficiary, &node, AMOUNT, "d-exp2");
+    state.set_logical_time(1_000);
+    assert_eq!(state.get_escrow("d-exp2").unwrap().status, EscrowStatus::Locked);
+    assert_eq!(state.get_balance(&node), 0);
+    state.set_logical_time(1_001);
+    assert_eq!(state.get_escrow("d-exp2").unwrap().status, EscrowStatus::Locked);
+    assert_eq!(state.deal_locked_uplp(&creator), AMOUNT);
+    assert_eq!(state.get_balance(&node), 0);
+}
+
+#[test]
+fn second_settle_after_release_is_rejected() {
+    let (state, creator, beneficiary, node) = funded();
+    lock_deal(&state, &creator, &beneficiary, &node, AMOUNT, "d-2");
+    confirm_accept(&state, &creator, "d-2", AMOUNT, &beneficiary, &node, "c").unwrap();
+    confirm_accept(&state, &beneficiary, "d-2", AMOUNT, &beneficiary, &node, "b").unwrap();
+    state.set_logical_time(DEAL_PEACEFUL_HOLD);
+    confirm_accept(&state, &beneficiary, "d-2", AMOUNT, &beneficiary, &node, "pay").unwrap();
+    let node_paid = state.get_balance(&node);
+    assert!(confirm_accept(&state, &creator, "d-2", AMOUNT, &beneficiary, &node, "again").is_err());
+    assert_eq!(state.get_balance(&node), node_paid);
+    assert_eq!(state.get_escrow("d-2").unwrap().status, EscrowStatus::Released);
 }
