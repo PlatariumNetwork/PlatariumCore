@@ -133,7 +133,7 @@ mod tests {
         let just_over = million + MICRO_PLP_PER_PLP;
         let fee_m = deal_fee_uplp(million, false);
         let fee_over = deal_fee_uplp(just_over, false);
-        assert_eq!(fee_over - fee_m, 1 * 100 / 10_000);
+        assert_eq!(fee_over - fee_m, MICRO_PLP_PER_PLP * 100 / 10_000);
         let one_k = 1_000 * MICRO_PLP_PER_PLP;
         let ten_k = 10_000 * MICRO_PLP_PER_PLP;
         assert!(deal_fee_uplp(ten_k, false) < deal_fee_uplp(one_k, false) * 10);
