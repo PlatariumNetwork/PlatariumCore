@@ -1,9 +1,19 @@
 //! Deal purpose: marginal node fee, not a share of principal.
 
+use sha2::{Digest, Sha256};
+
 use super::rules::{EscrowRules, RuleShare};
 use super::types::{RECEIVER_ROLE, SENDER_ROLE};
 
 pub const PURPOSE_DEAL: &str = "deal";
+pub const PANEL_INSTANCE_FIRST: u8 = 0x01;
+pub const PANEL_GENERATION_FIRST: u8 = 0x01;
+pub const PANEL_GENERATION_SECOND: u8 = 0x02;
+
+/// SHA-256 of the exact bytes. Does not trim and does not normalize Unicode.
+pub fn hash_deal_terms(terms: &[u8]) -> String {
+    hex::encode(Sha256::digest(terms))
+}
 
 /// 1 PLP = 1_000_000 μPLP.
 pub const MICRO_PLP_PER_PLP: u128 = 1_000_000;

@@ -96,6 +96,34 @@ pub struct Escrow {
     /// Volunteer keys that revealed the standing first-instance word, lexicographic at pay time.
     #[serde(default)]
     pub volunteer_majority: Vec<String>,
+    /// Exact terms bytes stored at lock. Hash does not trim or normalize.
+    #[serde(default)]
+    pub terms: Vec<u8>,
+    /// SHA-256 of `terms`, lowercase hex.
+    #[serde(default)]
+    pub terms_hash: String,
+    #[serde(default)]
+    pub complained: bool,
+    #[serde(default)]
+    pub creator_cancelled: bool,
+    #[serde(default)]
+    pub beneficiary_cancelled: bool,
+    /// Appeal fee taken from spendable, not from the lock.
+    #[serde(default)]
+    pub appeal_held: u128,
+    /// First-instance panel with no word of three. Principal stays locked.
+    #[serde(default)]
+    pub panel_no_result: bool,
+    /// 0x01 on both first and second first-instance panels.
+    #[serde(default)]
+    pub panel_instance: u8,
+    /// 0x01 first panel, 0x02 redraw.
+    #[serde(default)]
+    pub panel_generation: u8,
+    #[serde(default)]
+    pub first_panel: Vec<String>,
+    #[serde(default)]
+    pub second_panel: Vec<String>,
 }
 
 #[derive(Error, Debug, Clone, PartialEq, Eq)]

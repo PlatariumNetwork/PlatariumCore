@@ -51,6 +51,7 @@ mod escrow_engine_tests {
             treasury: "treasury".into(),
             burn: "burn".into(),
                     volunteer_majority: Vec::new(),
+                    terms: Vec::new(),
         };
         state
             .escrow_settle(
@@ -108,6 +109,7 @@ mod escrow_engine_tests {
                     treasury: "treasury".into(),
                     burn: "burn".into(),
                             volunteer_majority: Vec::new(),
+                    terms: Vec::new(),
         },
                 "sh",
                 None,
@@ -177,6 +179,7 @@ mod escrow_engine_tests {
             treasury: "treasury".into(),
             burn: "burn".into(),
                     volunteer_majority: Vec::new(),
+                    terms: Vec::new(),
         };
         state
             .escrow_settle(&settler, "dup", 10_000, 1, OUTCOME_ACCEPT, bindings.clone(), "a", None)
@@ -251,6 +254,7 @@ mod escrow_engine_tests {
                 treasury: "treasury".into(),
                 burn: "burn".into(),
                         volunteer_majority: Vec::new(),
+                    terms: Vec::new(),
         },
             "sh",
             None,
@@ -361,6 +365,7 @@ mod escrow_engine_tests {
                 treasury: "treasury".into(),
                 burn: "burn".into(),
                         volunteer_majority: Vec::new(),
+                    terms: Vec::new(),
         },
             "sh",
             None,
@@ -412,6 +417,7 @@ mod escrow_engine_tests {
                 treasury: "treasury".into(),
                 burn: "burn".into(),
                         volunteer_majority: Vec::new(),
+                    terms: Vec::new(),
         },
             "sh",
             None,
@@ -464,6 +470,7 @@ mod escrow_engine_tests {
                 treasury: "treasury".into(),
                 burn: "burn".into(),
                         volunteer_majority: Vec::new(),
+                    terms: Vec::new(),
         },
             "sh",
             None,
@@ -582,6 +589,7 @@ mod escrow_engine_tests {
                 treasury: "treasury".into(),
                 burn: "burn".into(),
                         volunteer_majority: Vec::new(),
+                    terms: Vec::new(),
         },
             "sh",
             None,
@@ -655,6 +663,7 @@ mod escrow_engine_tests {
                 treasury: "treasury".into(),
                 burn: "burn".into(),
                         volunteer_majority: Vec::new(),
+                    terms: Vec::new(),
         },
             "sh",
             None,
@@ -706,6 +715,7 @@ mod escrow_engine_tests {
                 treasury: "treasury".into(),
                 burn: "burn".into(),
                         volunteer_majority: Vec::new(),
+                    terms: Vec::new(),
         },
             "sh",
             None,
@@ -738,6 +748,7 @@ mod escrow_engine_tests {
                 treasury: "treasury".into(),
                 burn: "burn".into(),
                         volunteer_majority: Vec::new(),
+                    terms: Vec::new(),
         },
             "sh",
             None,

@@ -205,6 +205,7 @@ impl ExecutionLogic {
                     treasury: TREASURY_ADDRESS.to_string(),
                     burn: "burn".to_string(),
                             volunteer_majority: Vec::new(),
+                    terms: Vec::new(),
         };
                 state.escrow_settle(
                     &tx.from,

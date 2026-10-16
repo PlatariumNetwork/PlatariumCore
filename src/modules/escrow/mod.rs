@@ -10,7 +10,10 @@ pub mod types;
 #[cfg(test)]
 mod engine_tests;
 
-pub use deal::{deal_fee_uplp, deal_rules, split_volunteer_premium, DEAL_PEACEFUL_HOLD, PURPOSE_DEAL};
+pub use deal::{
+    deal_fee_uplp, deal_rules, hash_deal_terms, split_volunteer_premium, DEAL_PEACEFUL_HOLD,
+    PANEL_GENERATION_FIRST, PANEL_GENERATION_SECOND, PANEL_INSTANCE_FIRST, PURPOSE_DEAL,
+};
 pub use rules::{apply_rules, resolve_share_address, AddressBindings, EscrowRules, RuleShare, RulesError};
 pub use types::{
     Escrow, EscrowError, EscrowStatus, TX_KIND_ESCROW_CANCEL, TX_KIND_ESCROW_LOCK,

@@ -81,6 +81,8 @@ pub struct AddressBindings {
     pub burn: String,
     /// Keys that revealed the first-instance majority word. Empty on a peaceful close.
     pub volunteer_majority: Vec<String>,
+    /// Exact terms bytes for a complaint or appeal. Compared to the lock hash.
+    pub terms: Vec<u8>,
 }
 
 pub fn resolve_share_address(share_addr: &str, bindings: &AddressBindings) -> Option<String> {
@@ -158,6 +160,7 @@ mod tests {
             treasury: "treasury".into(),
             burn: "burn".into(),
                     volunteer_majority: Vec::new(),
+                    terms: Vec::new(),
         };
         let parts = apply_rules(&rules, "accept", 1_000_000, &bindings).unwrap();
         let sum: u128 = parts.iter().map(|(_, a)| a).sum();

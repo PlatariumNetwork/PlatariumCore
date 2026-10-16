@@ -17,7 +17,8 @@ use crate::core::contact_escrow::{ContactEscrowEntry, EscrowOutcome};
 use crate::core::transaction::{Transaction, TransactionValidationError};
 use crate::modules::contacteconomy::{contact_default_rules, PURPOSE_CONTACT, PURPOSE_DEAL};
 use crate::modules::escrow::deal::{
-    deal_fee_uplp, deal_rules, split_volunteer_premium, DEAL_PEACEFUL_HOLD,
+    deal_fee_uplp, deal_rules, hash_deal_terms, split_volunteer_premium, DEAL_PEACEFUL_HOLD,
+    PANEL_GENERATION_FIRST, PANEL_GENERATION_SECOND, PANEL_INSTANCE_FIRST,
 };
 use crate::modules::escrow::rules::{apply_rules, AddressBindings};
 use crate::modules::escrow::types::{
@@ -591,6 +592,17 @@ impl State {
             pending_outcome: String::new(),
             appealed: false,
             volunteer_majority: Vec::new(),
+            terms: Vec::new(),
+            terms_hash: hash_deal_terms(b""),
+            complained: false,
+            creator_cancelled: false,
+            beneficiary_cancelled: false,
+            appeal_held: 0,
+            panel_no_result: false,
+            panel_instance: 0,
+            panel_generation: 0,
+            first_panel: Vec::new(),
+            second_panel: Vec::new(),
         });
     }
 
@@ -837,8 +849,37 @@ impl State {
                 pending_outcome: String::new(),
                 appealed: false,
                 volunteer_majority: Vec::new(),
+                terms: Vec::new(),
+                terms_hash: hash_deal_terms(b""),
+                complained: false,
+                creator_cancelled: false,
+                beneficiary_cancelled: false,
+                appeal_held: 0,
+                panel_no_result: false,
+                panel_instance: 0,
+                panel_generation: 0,
+                first_panel: Vec::new(),
+                second_panel: Vec::new(),
             },
         );
+        Ok(())
+    }
+
+    /// Bind the exact terms bytes on a locked deal. Hash is SHA-256 of those bytes.
+    pub fn deal_store_terms(&self, escrow_id: &str, terms: &[u8]) -> Result<()> {
+        let mut ce_arc = self.contact_escrows.write().unwrap();
+        let ce = Arc::make_mut(&mut ce_arc);
+        let stored = ce
+            .get_mut(escrow_id)
+            .ok_or_else(|| StateError::Escrow(EscrowError::NotFound.to_string()))?;
+        if stored.purpose != PURPOSE_DEAL || stored.status != EscrowStatus::Locked {
+            return Err(StateError::Escrow(
+                EscrowError::InvalidStatus(stored.status).to_string(),
+            )
+            .into());
+        }
+        stored.terms = terms.to_vec();
+        stored.terms_hash = hash_deal_terms(terms);
         Ok(())
     }
 
@@ -1014,6 +1055,31 @@ impl State {
         ab.insert(k, bal.saturating_add(amt));
     }
 
+    fn debit_plp(
+        ab: &mut HashMap<(Address, String), u128>,
+        from: &Address,
+        amt: u128,
+    ) -> Result<()> {
+        if amt == 0 {
+            return Ok(());
+        }
+        let k = Self::asset_key(from, &Asset::PLP);
+        let bal = ab.get(&k).copied().unwrap_or(0);
+        if bal < amt {
+            return Err(StateError::InsufficientBalance {
+                required: amt,
+                available: bal,
+            }
+            .into());
+        }
+        ab.insert(k, bal - amt);
+        Ok(())
+    }
+
+    fn terms_match(entry: &Escrow, terms: &[u8]) -> bool {
+        hash_deal_terms(terms) == entry.terms_hash
+    }
+
     fn deal_hold_elapsed(now: u64, pending_close_at: u64, outcome: &str) -> bool {
         !outcome.is_empty() && now >= pending_close_at.saturating_add(DEAL_PEACEFUL_HOLD)
     }
@@ -1104,26 +1170,17 @@ impl State {
             .into());
         }
 
+        let party = Self::deal_party(entry, settler);
         match auth_key {
-            "cancel" | "timeout" => {
+            "timeout" => {
                 return Err(StateError::Escrow(
-                    EscrowError::InvalidRules(
-                        "a deal does not close on one signature or on expiry".into(),
-                    )
-                    .to_string(),
+                    EscrowError::InvalidRules("expiry does not close a deal".into()).to_string(),
                 )
                 .into());
             }
-            "accept" => {
-                if !Self::deal_party(entry, settler) {
-                    return Err(StateError::Escrow(
-                        EscrowError::UnauthorizedSettler(auth_key.into()).to_string(),
-                    )
-                    .into());
-                }
-            }
-            "dispute-fulfilled" | "dispute-not-fulfilled" => {
-                if !Self::deal_party(entry, settler) {
+            "cancel" | "accept" | "complaint" | "appeal" | "panel-no-result"
+            | "seat-second-panel" | "dispute-fulfilled" | "dispute-not-fulfilled" => {
+                if !party {
                     return Err(StateError::Escrow(
                         EscrowError::UnauthorizedSettler(auth_key.into()).to_string(),
                     )
@@ -1142,15 +1199,150 @@ impl State {
             .get_mut(escrow_id)
             .ok_or_else(|| StateError::Escrow(EscrowError::NotFound.to_string()))?;
         let now = self.logical_time();
+        let from_creator = settler == &stored.creator;
+
+        if matches!(auth_key, "complaint" | "appeal") && !Self::terms_match(stored, &bound.terms) {
+            return Err(StateError::Escrow(
+                EscrowError::InvalidRules("terms hash mismatch".into()).to_string(),
+            )
+            .into());
+        }
+
+        if auth_key == "complaint" {
+            if !stored.pending_outcome.is_empty() || stored.appealed {
+                return Err(StateError::Escrow(
+                    EscrowError::InvalidRules("complaint is not from locked phase".into()).to_string(),
+                )
+                .into());
+            }
+            stored.complained = true;
+            Self::debit_for_escrow_lock_in_maps(
+                ab, ub, nonces, settler, &Asset::PLP, 0, fee_uplp, expected_nonce,
+            )?;
+            return Ok(());
+        }
+
+        if auth_key == "cancel" {
+            if from_creator && stored.creator_confirmed {
+                return Err(StateError::Escrow(
+                    EscrowError::InvalidRules("confirmed party cannot cancel".into()).to_string(),
+                )
+                .into());
+            }
+            if !from_creator && stored.beneficiary_confirmed {
+                return Err(StateError::Escrow(
+                    EscrowError::InvalidRules("confirmed party cannot cancel".into()).to_string(),
+                )
+                .into());
+            }
+            if from_creator {
+                stored.creator_cancelled = true;
+            } else {
+                stored.beneficiary_cancelled = true;
+            }
+            if stored.creator_cancelled
+                && stored.beneficiary_cancelled
+                && stored.pending_outcome.is_empty()
+                && !stored.complained
+            {
+                stored.pending_close_at = now;
+                stored.pending_outcome = "cancel".into();
+            }
+            Self::debit_for_escrow_lock_in_maps(
+                ab, ub, nonces, settler, &Asset::PLP, 0, fee_uplp, expected_nonce,
+            )?;
+            return Ok(());
+        }
+
+        if auth_key == "appeal" {
+            if stored.appealed {
+                return Err(StateError::Escrow(
+                    EscrowError::InvalidRules("appeal already filed".into()).to_string(),
+                )
+                .into());
+            }
+            if stored.pending_outcome.is_empty() {
+                return Err(StateError::Escrow(
+                    EscrowError::InvalidRules("nothing to appeal".into()).to_string(),
+                )
+                .into());
+            }
+            let premium = stored
+                .reserved_fee
+                .saturating_sub(stored.peaceful_fee)
+                .min(stored.amount);
+            Self::debit_plp(ab, settler, premium)?;
+            stored.appeal_held = stored.appeal_held.saturating_add(premium);
+            stored.appealed = true;
+            Self::debit_for_escrow_lock_in_maps(
+                ab, ub, nonces, settler, &Asset::PLP, 0, fee_uplp, expected_nonce,
+            )?;
+            return Ok(());
+        }
+
+        if auth_key == "panel-no-result" {
+            stored.panel_no_result = true;
+            Self::debit_for_escrow_lock_in_maps(
+                ab, ub, nonces, settler, &Asset::PLP, 0, fee_uplp, expected_nonce,
+            )?;
+            return Ok(());
+        }
+
+        if auth_key == "seat-second-panel" {
+            if !stored.panel_no_result || !stored.second_panel.is_empty() {
+                return Err(StateError::Escrow(
+                    EscrowError::InvalidRules("second panel is not available".into()).to_string(),
+                )
+                .into());
+            }
+            let mut keys = bound.volunteer_majority.clone();
+            keys.sort();
+            keys.dedup();
+            keys.retain(|k| {
+                !k.is_empty()
+                    && k != &stored.creator
+                    && k != &stored.beneficiary
+                    && k != &stored.node
+                    && !stored.first_panel.iter().any(|p| p == k)
+                    && !stored.volunteer_majority.iter().any(|p| p == k)
+            });
+            if keys.len() < 5 {
+                return Err(StateError::Escrow(
+                    EscrowError::InvalidRules("five new keys cannot be seated".into()).to_string(),
+                )
+                .into());
+            }
+            keys.truncate(5);
+            stored.second_panel = keys;
+            stored.panel_instance = PANEL_INSTANCE_FIRST;
+            stored.panel_generation = PANEL_GENERATION_SECOND;
+            Self::debit_for_escrow_lock_in_maps(
+                ab, ub, nonces, settler, &Asset::PLP, 0, fee_uplp, expected_nonce,
+            )?;
+            return Ok(());
+        }
 
         if auth_key == "accept" {
-            if settler == &stored.creator {
-                stored.creator_confirmed = true;
+            if from_creator && stored.creator_cancelled {
+                return Err(StateError::Escrow(
+                    EscrowError::InvalidRules("cancelled party cannot confirm".into()).to_string(),
+                )
+                .into());
             }
-            if settler == &stored.beneficiary {
+            if !from_creator && stored.beneficiary_cancelled {
+                return Err(StateError::Escrow(
+                    EscrowError::InvalidRules("cancelled party cannot confirm".into()).to_string(),
+                )
+                .into());
+            }
+            if from_creator {
+                stored.creator_confirmed = true;
+            } else {
                 stored.beneficiary_confirmed = true;
             }
-            if !(stored.creator_confirmed && stored.beneficiary_confirmed) {
+            if stored.complained
+                || !(stored.creator_confirmed && stored.beneficiary_confirmed)
+            {
                 Self::debit_for_escrow_lock_in_maps(
                     ab, ub, nonces, settler, &Asset::PLP, 0, fee_uplp, expected_nonce,
                 )?;
@@ -1177,7 +1369,10 @@ impl State {
                     )
                     .into());
                 }
-                stored.volunteer_majority = keys;
+                stored.volunteer_majority = keys.clone();
+                stored.first_panel = keys;
+                stored.panel_instance = PANEL_INSTANCE_FIRST;
+                stored.panel_generation = PANEL_GENERATION_FIRST;
                 stored.pending_close_at = now;
                 stored.pending_outcome = auth_key.to_string();
                 Self::debit_for_escrow_lock_in_maps(
@@ -1193,7 +1388,15 @@ impl State {
             }
         }
 
+        if stored.complained && stored.pending_outcome == "accept" {
+            return Err(StateError::Escrow(
+                EscrowError::InvalidRules("complaint blocks a peaceful release".into()).to_string(),
+            )
+            .into());
+        }
+
         if stored.appealed
+            || stored.pending_outcome == "cancel"
             || !Self::deal_hold_elapsed(now, stored.pending_close_at, &stored.pending_outcome)
         {
             return Err(StateError::Escrow(
@@ -1350,6 +1553,7 @@ impl State {
             treasury: TREASURY_ADDRESS.to_string(),
             burn: "burn".to_string(),
                     volunteer_majority: Vec::new(),
+                    terms: Vec::new(),
         };
         self.escrow_settle(
             settler,
@@ -1389,6 +1593,7 @@ impl State {
             treasury: TREASURY_ADDRESS.to_string(),
             burn: "burn".to_string(),
                     volunteer_majority: Vec::new(),
+                    terms: Vec::new(),
         };
         // Prefer reject rules if present; else credit 100% to creator.
         if entry.rules.outcomes.contains_key("reject") {
@@ -1477,6 +1682,7 @@ impl State {
             treasury: TREASURY_ADDRESS.to_string(),
             burn: "burn".to_string(),
                     volunteer_majority: Vec::new(),
+                    terms: Vec::new(),
         };
         self.escrow_settle_with_auth(
             settler,
@@ -1536,6 +1742,7 @@ impl State {
                     treasury: TREASURY_ADDRESS.to_string(),
                     burn: "burn".to_string(),
                             volunteer_majority: Vec::new(),
+                    terms: Vec::new(),
         };
                 self.escrow_settle(
                     &tx.from,
